@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/meshd run
+ExecStart=/usr/bin/meshd run
 Restart=on-failure
 RestartSec=5s
 
