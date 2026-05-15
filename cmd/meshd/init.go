@@ -7,6 +7,7 @@ import (
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
+	"github.com/tumour/awg-mesh/internal/jointoken"
 	"github.com/tumour/awg-mesh/internal/state"
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
@@ -25,7 +26,8 @@ func cmdInit(args []string) error {
 	listenAddr := fs.String("listen", ":51820", "WireGuard listen address (host:port)")
 	publicEndpoint := fs.String("public-endpoint", "",
 		"public endpoint announced to peers (host:port) — usually <public-ip>:51820")
-	cidr := fs.String("cidr", "10.10.0.0/24", "mesh network CIDR")
+	cidr := fs.String("cidr", "100.64.0.0/24",
+		"mesh network CIDR (default CGNAT range, не пересекается с домашними LAN'ами)")
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	fs.Parse(args)
 
@@ -88,6 +90,17 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("save state: %w", err)
 	}
 
+	// Bootstrap-token = base64url(JSON{secret, seed_pubkey, seed_endpoint}).
+	// Один параметр для копипасты вместо трёх — UX-фишка Tailscale auth-keys.
+	token, err := jointoken.Encode(jointoken.Token{
+		Secret:       cs.String(),
+		SeedPubKey:   pub.String(),
+		SeedEndpoint: *publicEndpoint,
+	})
+	if err != nil {
+		return fmt.Errorf("encode join-token: %w", err)
+	}
+
 	fmt.Printf(`✓ mesh initialized
 
   label:            %s
@@ -98,14 +111,11 @@ func cmdInit(args []string) error {
 
 To onboard another node, run on it:
 
-  meshd join \
-      --label <node-name> \
-      --seed %s \
-      --secret %s
+  meshd join --label <node-name> --token %s
 
-Keep the secret confidential — anyone with it can join this mesh.
-`, *label, *cidr, hubIP, *publicEndpoint, *stateFlag,
-		*publicEndpoint, cs.String())
+Token contains the cluster-secret — keep it confidential (send via scp/ssh,
+not chat). Anyone with the token can join this mesh.
+`, *label, *cidr, hubIP, *publicEndpoint, *stateFlag, token)
 
 	return nil
 }
