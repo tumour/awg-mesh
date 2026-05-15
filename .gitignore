@@ -1,6 +1,7 @@
 # Local state / build artifacts
 /meshd
 /meshd-*
+/bin/
 *.test
 state.json
 

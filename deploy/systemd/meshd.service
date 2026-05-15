@@ -1,0 +1,39 @@
+[Unit]
+Description=AmneziaWG mesh node daemon (meshd)
+Documentation=https://github.com/tumour/awg-mesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/meshd run
+Restart=on-failure
+RestartSec=5s
+
+# Привилегии — для tun.CreateTUN и ip-команд.
+# CAP_NET_ADMIN достаточно: создание TUN, ip addr/link через netlink.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+# Sandbox: meshd не пишет ничего за пределами /etc/meshd, не нуждается в shell-доступе.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/meshd
+PrivateTmp=true
+PrivateDevices=false           # нужен /dev/net/tun
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+
+# Логи в journal под именем meshd.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meshd
+
+[Install]
+WantedBy=multi-user.target

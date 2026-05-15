@@ -11,10 +11,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	awgdev "github.com/amnezia-vpn/amneziawg-go/device"
 
 	"github.com/tumour/awg-mesh/internal/clusterkey"
+	"github.com/tumour/awg-mesh/internal/gossip"
 	"github.com/tumour/awg-mesh/internal/handshake"
 	"github.com/tumour/awg-mesh/internal/state"
 	"github.com/tumour/awg-mesh/internal/wg"
@@ -34,6 +36,8 @@ func cmdRun(args []string) error {
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	iface := fs.String("interface", "awg0", "TUN interface name")
 	verbose := fs.Bool("verbose", false, "enable verbose AmneziaWG-device logs")
+	gossipInterval := fs.Duration("gossip-interval", 60*time.Second,
+		"how often to pull peer-list from a random peer (0 = disabled)")
 	fs.Parse(args)
 
 	s, err := state.Load(*stateFlag)
@@ -56,6 +60,16 @@ func cmdRun(args []string) error {
 	listenPort := 0
 	if s.IsSeed {
 		listenPort = s.ListenPort
+	}
+
+	// Startup-cleanup: если предыдущий запуск crashed без graceful shutdown,
+	// TUN-интерфейс остался — удаляем чтобы tun.CreateTUN не фейлил.
+	// Игнорируем ошибку "Cannot find device" (интерфейса просто нет).
+	if out, err := exec.Command("ip", "link", "delete", "dev", *iface).CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "Cannot find device") {
+			log.Printf("warn: cleanup stale interface %s: %v: %s",
+				*iface, err, strings.TrimSpace(string(out)))
+		}
 	}
 
 	device, err := wg.New(*iface, listenPort, logLevel)
@@ -86,6 +100,27 @@ func cmdRun(args []string) error {
 
 	if s.IsSeed {
 		go runBootstrapListener(ctx, *stateFlag, priv, pub, device)
+	}
+
+	// Gossip-server (отдаёт peer-list) и gossip-client (periodic pull).
+	// Сервер слушает только на mesh-IP — снаружи (через eth0) недоступен.
+	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, *stateFlag)
+	go func() {
+		if err := gossipSrv.Start(ctx); err != nil {
+			log.Printf("gossip server: %v", err)
+		}
+	}()
+
+	if *gossipInterval > 0 {
+		gossipClient := gossip.NewClient(*stateFlag, pub.String(), *gossipInterval,
+			gossip.DefaultPort, func(newPeers []state.Peer) {
+				for _, p := range newPeers {
+					if err := device.UpdatePeer(p); err != nil {
+						log.Printf("gossip: push %s to device: %v", p.Label, err)
+					}
+				}
+			})
+		go gossipClient.Run(ctx)
 	}
 
 	log.Printf("meshd run: ready, waiting for signals")
