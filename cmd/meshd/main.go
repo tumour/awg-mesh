@@ -38,6 +38,8 @@ func main() {
 		err = cmdInit(args)
 	case "join":
 		err = cmdJoin(args)
+	case "serve":
+		err = cmdServe(args)
 	case "status":
 		err = cmdStatus(args)
 	case "help", "-h", "--help":
@@ -61,6 +63,7 @@ func usage() {
 Commands:
   init     Initialize a new mesh network (first node, becomes seed)
   join     Join an existing mesh network via a seed
+  serve    Run bootstrap-listener on seed-node (accepts joins)
   status   Print current state and peer info
   version  Print version
 
