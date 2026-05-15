@@ -8,6 +8,7 @@ package wgkey
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 
 	"golang.org/x/crypto/curve25519"
@@ -58,6 +59,11 @@ func ParsePrivate(s string) (Private, error) {
 	copy(p[:], raw)
 	return p, nil
 }
+
+// Hex — кодировка для UAPI-протокола (amneziawg/wireguard принимает hex,
+// в отличие от base64 в wg-quick конфигах).
+func (p Private) Hex() string { return hex.EncodeToString(p[:]) }
+func (p Public) Hex() string  { return hex.EncodeToString(p[:]) }
 
 // ParsePublic декодирует base64-публичник.
 func ParsePublic(s string) (Public, error) {

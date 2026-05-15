@@ -38,6 +38,8 @@ func main() {
 		err = cmdInit(args)
 	case "join":
 		err = cmdJoin(args)
+	case "run":
+		err = cmdRun(args)
 	case "serve":
 		err = cmdServe(args)
 	case "status":
@@ -63,7 +65,8 @@ func usage() {
 Commands:
   init     Initialize a new mesh network (first node, becomes seed)
   join     Join an existing mesh network via a seed
-  serve    Run bootstrap-listener on seed-node (accepts joins)
+  run      Run meshd daemon: bring up wg-interface + (if seed) bootstrap listener
+  serve    Run only bootstrap-listener (without wg-device; for debug/testing)
   status   Print current state and peer info
   version  Print version
 
