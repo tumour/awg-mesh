@@ -21,7 +21,8 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/etc/meshd
 PrivateTmp=true
-PrivateDevices=false           # нужен /dev/net/tun
+# PrivateDevices=false — нужен /dev/net/tun. Дефолт false, явно не указываем
+# (systemd inline-comments после value не понимает, только в начале строки).
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
