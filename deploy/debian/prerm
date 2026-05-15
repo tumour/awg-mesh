@@ -1,0 +1,16 @@
+#!/bin/bash
+# prerm — выполняется ДО удаления пакета (apt remove / dpkg -r).
+# state.json не трогаем — он сохраняется на случай если ставим обратно
+# или upgrade'ит до более новой версии. Полный cleanup — postrm с purge.
+
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl stop meshd.service >/dev/null 2>&1 || true
+    systemctl disable meshd.service >/dev/null 2>&1 || true
+fi
+
+# Снести TUN-интерфейс если daemon не успел graceful shutdown.
+ip link delete dev awg0 >/dev/null 2>&1 || true
+
+exit 0

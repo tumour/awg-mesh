@@ -29,6 +29,8 @@ func cmdInit(args []string) error {
 	cidr := fs.String("cidr", "100.64.0.0/24",
 		"mesh network CIDR (default CGNAT range, не пересекается с домашними LAN'ами)")
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
+	noAutoStart := fs.Bool("no-auto-start", false,
+		"skip starting meshd daemon via systemctl after init")
 	fs.Parse(args)
 
 	if *label == "" {
@@ -109,13 +111,22 @@ func cmdInit(args []string) error {
   public endpoint:  %s
   state file:       %s
 
+`, *label, *cidr, hubIP, *publicEndpoint, *stateFlag)
+
+	if !*noAutoStart {
+		if !autoStartDaemon(*stateFlag) {
+			printManualStartHint()
+		}
+	}
+
+	fmt.Printf(`
 To onboard another node, run on it:
 
   meshd join --label <node-name> --token %s
 
 Token contains the cluster-secret — keep it confidential (send via scp/ssh,
 not chat). Anyone with the token can join this mesh.
-`, *label, *cidr, hubIP, *publicEndpoint, *stateFlag, token)
+`, token)
 
 	return nil
 }

@@ -1,0 +1,56 @@
+# nfpm config для сборки .deb-пакета.
+# Используется через `nfpm pkg --packager deb --target out.deb`.
+#
+# Параметры (binary path, arch, version) подставляются из env-vars
+# через nfpm template-substitution ${VAR}. В Makefile / GHA-workflow они
+# выставляются перед запуском nfpm.
+
+name: meshd
+arch: ${ARCH}
+version: ${VERSION}
+maintainer: Alexandr <ivanov94.94@mail.ru>
+description: |
+  AmneziaWG-based mesh networking daemon.
+  DPI-resistant point-to-point tunnels with gossip peer discovery,
+  Noise IKpsk2 bootstrap handshake, Tailscale-style auth-tokens.
+vendor: tumour
+homepage: https://github.com/tumour/awg-mesh
+license: MIT
+
+# Зависимости target-системы. iproute2 нужен для 'ip addr add' и 'ip link delete'
+# из cmd/meshd/run.go.
+depends:
+  - iproute2
+
+# Содержимое пакета.
+contents:
+  - src: ./bin/meshd-linux-${ARCH}
+    dst: /usr/bin/meshd
+    file_info:
+      mode: 0755
+  - src: ./deploy/systemd/meshd.service
+    dst: /lib/systemd/system/meshd.service
+    file_info:
+      mode: 0644
+  - src: ./README.md
+    dst: /usr/share/doc/meshd/README.md
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/doc/meshd/LICENSE
+    file_info:
+      mode: 0644
+    type: config
+
+# Hook-скрипты Debian. Запускаются apt в lifecycle install/upgrade/remove/purge.
+scripts:
+  postinstall: ./deploy/debian/postinst
+  preremove:   ./deploy/debian/prerm
+  postremove:  ./deploy/debian/postrm
+
+# .deb-специфичные настройки.
+deb:
+  # Conflicts — пакеты с которыми наш конфликтует (например wireguard,
+  # если бы мы использовали тот же интерфейс). Сейчас нет конфликтов.
+  fields:
+    Bugs: https://github.com/tumour/awg-mesh/issues

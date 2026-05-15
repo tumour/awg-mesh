@@ -1,0 +1,40 @@
+#!/bin/bash
+# postinst — выполняется после распаковки .deb-пакета.
+# Идемпотентно: повторный install не ломает существующую инсталляцию.
+
+set -e
+
+# Создаём state-директорию с правильными правами.
+# chmod 700 потому что внутри хранится private-key + cluster-secret.
+mkdir -p /etc/meshd
+chmod 700 /etc/meshd
+
+# systemd: подхватить новый/обновлённый unit-file.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+
+    # Enable чтобы при ребуте стартовал автоматом. Не start —
+    # пока нет state.json, daemon упадёт.
+    systemctl enable meshd.service >/dev/null 2>&1 || true
+
+    # Если state.json уже есть (upgrade существующей установки) — рестарт
+    # подхватит новый бинарь.
+    if [ -f /etc/meshd/state.json ]; then
+        systemctl restart meshd.service || true
+        echo "✓ meshd upgraded and restarted"
+    else
+        cat <<'EOF'
+✓ meshd installed
+
+  Next: bootstrap this node into a mesh:
+
+    meshd init  --label <name> --public-endpoint <public-ip>:51820
+    # ...or join an existing mesh:
+    meshd join --label <name> --token <TOKEN_FROM_INIT_OUTPUT>
+
+  Daemon starts automatically after init/join.
+EOF
+    fi
+fi
+
+exit 0

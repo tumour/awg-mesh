@@ -29,6 +29,8 @@ func cmdJoin(args []string) error {
 	label := fs.String("label", "", "human-readable node label (required), e.g. 'hetzner'")
 	tokenStr := fs.String("token", "", "join-token from `meshd init` output (required)")
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
+	noAutoStart := fs.Bool("no-auto-start", false,
+		"skip starting meshd daemon via systemctl after join")
 	fs.Parse(args)
 
 	if *label == "" {
@@ -174,6 +176,12 @@ func cmdJoin(args []string) error {
   state file:   %s
 `, *label, resp.NetworkCIDR, resp.YourIP, pub.String(),
 		tok.SeedEndpoint, len(peers), *stateFlag)
+
+	if !*noAutoStart {
+		if !autoStartDaemon(*stateFlag) {
+			printManualStartHint()
+		}
+	}
 
 	return nil
 }

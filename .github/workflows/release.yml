@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # for creating Release + uploading assets
+
+jobs:
+  release:
+    name: build .deb + create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # для git describe в Makefile
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext-base
+
+      - name: build binaries
+        run: make build-all
+
+      - name: build .deb packages
+        run: make package-all
+
+      - name: list artifacts
+        run: ls -la bin/ dist/
+
+      - name: create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            bin/meshd-linux-amd64
+            bin/meshd-linux-arm64
+            bin/meshd-linux-armv7
+            dist/meshd_*_amd64.deb
+            dist/meshd_*_arm64.deb

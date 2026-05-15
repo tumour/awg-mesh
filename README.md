@@ -28,67 +28,70 @@ Control plane (peer discovery, авторизация) — самописный 
 
 ## Quick start
 
-### 1. Сборка
+### 1. Установка через .deb-пакет
+
+Качаем готовый `.deb` из [GitHub Releases](https://github.com/tumour/awg-mesh/releases) и ставим. Архитектура — `amd64` или `arm64`:
 
 ```bash
-git clone https://github.com/tumour/awg-mesh && cd awg-mesh
-make build-all   # бинарники под amd64/arm64/armv7 в bin/
+# скачать (подставь нужную версию):
+wget https://github.com/tumour/awg-mesh/releases/latest/download/meshd_0.1.0_amd64.deb
+
+# установить — postinst автоматом enable'ит systemd-unit:
+sudo dpkg -i meshd_0.1.0_amd64.deb
 ```
 
-Или скачать готовые бинарники из [Releases](https://github.com/tumour/awg-mesh/releases).
+После `dpkg -i`:
+- бинарник в `/usr/bin/meshd`
+- systemd-юнит в `/lib/systemd/system/meshd.service` (enabled, но не started — daemon ждёт state.json)
+- директория `/etc/meshd/` (chmod 700, для state и ключей)
 
-### 2. Установка на первую (seed) ноду
+### 2. Bootstrap первой ноды (seed)
 
 ```bash
-scp bin/meshd-linux-amd64 root@seed-host:/tmp/meshd
-ssh root@seed-host
+# открыть порты в UFW (только на seed-ноде):
+sudo ufw allow 51820/tcp comment 'awg-mesh bootstrap'
+sudo ufw allow 51820/udp comment 'awg-mesh data'
 
-# install:
-bash <(curl -sSL https://raw.githubusercontent.com/tumour/awg-mesh/main/deploy/install.sh) --binary /tmp/meshd
-
-# initialize mesh (этот узел становится seed):
-meshd init \
-    --label seed-node \
-    --public-endpoint <SEED_PUBLIC_IP>:51820
-
-# скопировать --token из вывода!
-
-# открыть порты в UFW:
-ufw allow 51820/tcp comment 'awg-mesh bootstrap'
-ufw allow 51820/udp comment 'awg-mesh data'
-
-# запустить:
-systemctl enable --now meshd
-systemctl status meshd
+# initialize mesh — этот узел становится seed:
+sudo meshd init --label seed-node --public-endpoint <SEED_PUBLIC_IP>:51820
+# auto-start выполняется автоматом
 ```
 
-### 3. Onboarding каждой следующей ноды
+Из вывода скопируй **--token** — пригодится для следующих нод.
 
-На любой Linux-VPS:
+### 3. Onboarding следующих нод
+
+На любой Linux-VPS (любая страна, любой провайдер, нужен `dpkg -i meshd_*.deb` сначала):
 
 ```bash
-scp bin/meshd-linux-amd64 root@new-host:/tmp/meshd
-ssh root@new-host
-
-bash <(curl -sSL https://raw.githubusercontent.com/tumour/awg-mesh/main/deploy/install.sh) --binary /tmp/meshd
-
-# подключиться к существующему mesh'у:
-meshd join --label new-node --token <ТОКЕН-ИЗ-ВЫВОДА-INIT>
-
-systemctl enable --now meshd
+sudo meshd join --label new-node --token <ТОКЕН-ИЗ-INIT>
+# auto-start включается сам
 ```
 
-Через минуту-две новая нода появится в `meshd status` на всех остальных нодах
-(через gossip-обмен).
+UFW трогать **не надо** — обычная нода = initiator, исходящий outbound и так открыт.
+
+Через минуту-две новая нода появится в `meshd status` на всех остальных нодах (через gossip).
 
 ### 4. Проверка
 
 ```bash
 meshd status                 # peer-list, mesh-IP
 ip addr show awg0            # интерфейс с mesh-IP
-ip link show awg0            # MTU 1420
 ping 100.64.0.1              # ping к seed через wg-туннель
 journalctl -u meshd -f       # логи демона
+systemctl status meshd       # статус сервиса
+```
+
+### Сборка из исходников (опционально)
+
+Если хочется собрать локально:
+
+```bash
+git clone https://github.com/tumour/awg-mesh && cd awg-mesh
+go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+make build-all     # бинарники в bin/ под amd64/arm64/armv7
+make package-all   # .deb-пакеты в dist/ под amd64/arm64
 ```
 
 ## Архитектура
@@ -163,21 +166,26 @@ journalctl -u meshd -f       # логи демона
 | `meshd status` | Показывает peer-list и mesh-IP |
 | `meshd version` | Версия бинарника |
 
-## Production-сборка
+## Размеры артефактов
+
+| Артефакт | amd64 | arm64 | armv7 |
+|---|---|---|---|
+| Статический бинарник (Go, без CGO) | 7.9 MB | 7.3 MB | 7.6 MB |
+| .deb-пакет (compressed) | 3.3 MB | 3.0 MB | — |
+
+`.deb` собирается через [nfpm](https://nfpm.goreleaser.com) (`make package-all`). В одном пакете: бинарник, systemd-юнит, postinst/prerm/postrm hook-скрипты, LICENSE + README.
+
+## Uninstall
 
 ```bash
-make build-prod         # для текущей архитектуры
-# или
-make build-all          # cross-compile под amd64/arm64/armv7
+# Снять systemd-юнит и убрать пакет, оставить state.json:
+sudo apt remove meshd
+
+# Полный wipe — включая /etc/meshd с ключами:
+sudo apt purge meshd
 ```
 
-Размер production-бинарника (`-ldflags="-s -w" -trimpath`, без CGO):
-- amd64: ~7.9 MB
-- arm64: ~7.3 MB
-- armv7: ~7.6 MB
-
-Statically linked — никаких runtime-зависимостей на target-машине, никакого
-Go не нужно.
+`prerm` сам делает `systemctl stop` + `disable` и `ip link delete awg0`. `postrm purge` удаляет state-директорию.
 
 ## Лицензия
 

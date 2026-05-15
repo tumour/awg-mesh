@@ -1,0 +1,19 @@
+#!/bin/bash
+# postrm — выполняется ПОСЛЕ удаления пакета.
+# При apt purge ($1 == purge) — удаляем state-директорию.
+# При apt remove ($1 == remove) — state.json сохраняется.
+
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /etc/meshd
+        echo "✓ meshd purged (state removed)"
+        ;;
+esac
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0
