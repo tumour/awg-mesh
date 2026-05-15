@@ -1,0 +1,111 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+
+	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/clusterkey"
+	"github.com/tumour/awg-mesh/internal/state"
+	"github.com/tumour/awg-mesh/internal/wgkey"
+)
+
+// cmdInit — инициализация новой mesh-сети.
+//
+// Генерируем: cluster-secret, AmneziaWG-параметры, наш keypair, network CIDR.
+// Пишем state.json с ролью is_seed=true. Печатаем join-команду для других нод.
+//
+// Идемпотентность: отказывается работать если state-file уже существует
+// (иначе можно случайно перезаписать ключи и потерять mesh). Чтобы переинициализировать —
+// удалить state-file вручную.
+func cmdInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	label := fs.String("label", "", "human-readable node label (required), e.g. 'beget'")
+	listenAddr := fs.String("listen", ":51820", "WireGuard listen address (host:port)")
+	publicEndpoint := fs.String("public-endpoint", "",
+		"public endpoint announced to peers (host:port) — usually <public-ip>:51820")
+	cidr := fs.String("cidr", "10.10.0.0/24", "mesh network CIDR")
+	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
+	fs.Parse(args)
+
+	if *label == "" {
+		return fmt.Errorf("--label is required")
+	}
+	if *publicEndpoint == "" {
+		return fmt.Errorf("--public-endpoint is required (e.g. --public-endpoint 45.146.165.227:51820)")
+	}
+
+	// Не перезаписываем существующий state — это опасно (потеря ключей).
+	if _, err := os.Stat(*stateFlag); err == nil {
+		return fmt.Errorf("state file %s already exists; delete it manually to re-init", *stateFlag)
+	}
+
+	cs, err := clusterkey.Generate()
+	if err != nil {
+		return fmt.Errorf("cluster-secret: %w", err)
+	}
+	params, err := awgparams.Generate()
+	if err != nil {
+		return fmt.Errorf("awg-params: %w", err)
+	}
+	priv, err := wgkey.GeneratePrivate()
+	if err != nil {
+		return fmt.Errorf("wg keypair: %w", err)
+	}
+	pub := priv.Public()
+
+	// IP первой ноды = первый usable в CIDR. Для /24 это <network>.1.
+	// Парсить CIDR полноценно будем когда добавятся другие ноды; для init этого хватит.
+	hubIP, err := firstUsableIP(*cidr)
+	if err != nil {
+		return fmt.Errorf("parse cidr: %w", err)
+	}
+
+	s := &state.State{
+		Version:       1,
+		NodeLabel:     *label,
+		ClusterSecret: cs.String(),
+		AwgParams:     params,
+		NetworkCIDR:   *cidr,
+		PrivateKey:    priv.String(),
+		PublicKey:     pub.String(),
+		NodeIP:        hubIP,
+		ListenPort:    parsePort(*listenAddr),
+		IsSeed:        true,
+		Peers: []state.Peer{
+			{
+				Label:     *label,
+				PublicKey: pub.String(),
+				Endpoint:  *publicEndpoint,
+				NodeIP:    hubIP,
+				IsSeed:    true,
+			},
+		},
+	}
+
+	if err := s.Save(*stateFlag); err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
+
+	fmt.Printf(`✓ mesh initialized
+
+  label:            %s
+  network:          %s
+  node ip:          %s
+  public endpoint:  %s
+  state file:       %s
+
+To onboard another node, run on it:
+
+  meshd join \
+      --label <node-name> \
+      --seed %s \
+      --secret %s
+
+Keep the secret confidential — anyone with it can join this mesh.
+`, *label, *cidr, hubIP, *publicEndpoint, *stateFlag,
+		*publicEndpoint, cs.String())
+
+	return nil
+}

@@ -1,0 +1,10 @@
+# Local state / build artifacts
+/meshd
+/meshd-*
+*.test
+state.json
+
+# Editor
+*.swp
+.idea/
+.vscode/
