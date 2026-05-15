@@ -148,12 +148,28 @@ make package-all   # .deb-пакеты в dist/ под amd64/arm64
 - **Gossip**: HTTP без extra-auth, **но gossip-сервер биндится только на mesh-IP**
   — с публичного интерфейса недоступен. Trust-by-tunneling: внутри wg-сети
   все peers уже прошли cluster-secret-проверку.
+- **UFW**: postinst добавляет `ufw allow in on awg0` — разрешает весь трафик
+  с mesh-интерфейса (Tailscale-pattern: default-allow внутри tunnel'я). Снаружи
+  (eth0) ничего не открывается. При `apt remove` правило снимается через prerm.
 - **State at rest**: `state.json` `chmod 600`, owned by root. Не пиши никуда
   кроме `/etc/meshd/`.
 - **Cluster-secret leak**: эквивалентно root-доступу к mesh. Передавать токен
   через scp/ssh, не через мессенджеры.
 
-См. также сравнение с Tailscale security model в проектной документации.
+### Что защищено снаружи (три слоя)
+
+1. **Bind на mesh-IP**: gossip-server слушает `100.64.0.X:9100`, не `0.0.0.0`.
+   На eth0 порт **физически не слушает**.
+2. **UFW**: даже если бы listener был на 0.0.0.0, UFW дропает входящий 9100
+   с публичного интерфейса.
+3. **RFC 6598 CGNAT-подсеть** `100.64.0.0/24` — не маршрутизируется в публичный
+   интернет. Адресовать mesh-IP снаружи физически невозможно.
+
+### Что **не** защищено
+
+Compromise одной из mesh-нод → атакующий через mesh может стучаться к другим
+по любым портам. Защита — app-layer auth (SSH-key, Bearer-token, UUID).
+Mitigation — revoke pubkey (в v2 — tombstone-распространение через gossip).
 
 ## Команды
 

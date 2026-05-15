@@ -13,4 +13,9 @@ fi
 # Снести TUN-интерфейс если daemon не успел graceful shutdown.
 ip link delete dev awg0 >/dev/null 2>&1 || true
 
+# Снять UFW-правило для mesh-интерфейса (добавили в postinst).
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw delete allow in on awg0 >/dev/null 2>&1 || true
+fi
+
 exit 0
