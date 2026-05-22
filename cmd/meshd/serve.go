@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -265,23 +266,22 @@ func shortKey(k string) string {
 }
 
 // readFramed читает 2-байт length prefix + body.
+//
+// ВАЖНО: используется io.ReadFull, не conn.Read — последний может вернуть
+// partial read без err (например 1 байт вместо 2). На fragmented TCP это
+// привело бы к length из мусора и обрыву handshake.
 func readFramed(conn net.Conn, maxSize int) ([]byte, error) {
 	var lenBuf [2]byte
-	if _, err := conn.Read(lenBuf[:]); err != nil {
-		return nil, err
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, fmt.Errorf("read length: %w", err)
 	}
 	size := int(lenBuf[0])<<8 | int(lenBuf[1])
 	if size == 0 || size > maxSize {
 		return nil, fmt.Errorf("invalid frame size: %d (max %d)", size, maxSize)
 	}
 	buf := make([]byte, size)
-	read := 0
-	for read < size {
-		n, err := conn.Read(buf[read:])
-		if err != nil {
-			return nil, err
-		}
-		read += n
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
 	}
 	return buf, nil
 }

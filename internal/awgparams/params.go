@@ -46,7 +46,9 @@ func Generate() (Params, error) {
 	if err != nil {
 		return Params{}, err
 	}
-	jmax, err := randIntRange(50, 200)
+	// Гарантируем Jmax > Jmin — иначе диапазон рандомизации junk-пакетов
+	// схлопывается в фиксированный размер, обфускация теряет смысл.
+	jmax, err := randIntRange(jmin+1, 200)
 	if err != nil {
 		return Params{}, err
 	}

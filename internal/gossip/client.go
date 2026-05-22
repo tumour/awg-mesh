@@ -79,21 +79,21 @@ func (c *Client) doRound() {
 		return
 	}
 
-	newPeers := mergePeers(st.Peers, resp.Peers, c.selfPub)
-	if len(newPeers) == 0 {
-		return // ничего нового
+	merged, changed := mergePeers(st.Peers, resp.Peers, c.selfPub)
+	if len(changed) == 0 {
+		return // ничего нового и ничего не изменилось
 	}
 
-	// Сохраняем обновлённый state и применяем к wg-device.
-	st.Peers = append(st.Peers, newPeers...)
+	// Заменяем peer-list полностью (мог обновиться endpoint существующих).
+	st.Peers = merged
 	if err := st.Save(c.statePath); err != nil {
 		log.Printf("gossip: save state: %v", err)
 		return
 	}
-	log.Printf("gossip: learned %d new peers from %s", len(newPeers), target.Label)
+	log.Printf("gossip: %d peers added/updated (from %s)", len(changed), target.Label)
 
 	if c.onNewPeers != nil {
-		c.onNewPeers(newPeers)
+		c.onNewPeers(changed)
 	}
 }
 
@@ -139,29 +139,82 @@ func pickRandomPeer(peers []state.Peer, selfPub string) *state.Peer {
 	return &picked
 }
 
-// mergePeers — возвращает peer'ов из remote, которых нет в local (по pubkey).
-// Себя из remote всегда отфильтровываем.
-func mergePeers(local []state.Peer, remote []PeerInfo, selfPub string) []state.Peer {
-	known := make(map[string]bool, len(local))
-	for _, p := range local {
-		known[p.PublicKey] = true
-	}
-	var added []state.Peer
+// mergePeers — мерж peer-list'а с remote-ноды через gossip.
+//
+// Возвращает (merged, changed):
+//   merged — полный новый список для state.Peers (с обновлёнными endpoint'ами
+//            существующих peer'ов и refresh'нутыми LastSeen).
+//   changed — что надо пушнуть в wg-device через UpdatePeer (новые peers + те
+//            у кого изменился endpoint). Pure refresh LastSeen в changed не идёт —
+//            wg-device от этого не зависит.
+//
+// Себя из remote всегда отфильтровываем (selfPub). Себя из local — сохраняем
+// как есть. Удаление peer'ов (revoke / tombstone) — v0.2, сейчас union-with-update.
+func mergePeers(local []state.Peer, remote []PeerInfo, selfPub string) (merged []state.Peer, changed []state.Peer) {
+	// Индекс remote по pubkey, заодно отфильтровываем себя.
+	rByKey := make(map[string]PeerInfo, len(remote))
 	for _, r := range remote {
 		if r.PublicKey == selfPub {
 			continue
 		}
-		if known[r.PublicKey] {
+		rByKey[r.PublicKey] = r
+	}
+
+	now := time.Now().UTC()
+	localKeys := make(map[string]bool, len(local))
+
+	// Проход по local — обновляем endpoint/label/IsSeed если remote знает свежее.
+	for _, p := range local {
+		localKeys[p.PublicKey] = true
+		if p.PublicKey == selfPub {
+			merged = append(merged, p)
 			continue
 		}
-		added = append(added, state.Peer{
+		r, ok := rByKey[p.PublicKey]
+		if !ok {
+			// Remote не знает — оставляем как есть, LastSeen не refresh'аем
+			// (мы её не подтвердили этим раундом).
+			merged = append(merged, p)
+			continue
+		}
+		updated := p
+		updated.LastSeen = now
+		endpointChanged := r.Endpoint != "" && r.Endpoint != p.Endpoint
+		if endpointChanged {
+			updated.Endpoint = r.Endpoint
+		}
+		if r.Label != "" && r.Label != p.Label {
+			updated.Label = r.Label
+		}
+		if r.IsSeed != p.IsSeed {
+			updated.IsSeed = r.IsSeed
+		}
+		merged = append(merged, updated)
+		// В wg-device пушим только при endpoint-смене — label/IsSeed на wg не влияют.
+		if endpointChanged {
+			changed = append(changed, updated)
+		}
+	}
+
+	// Новые peers — те что есть в remote, но не в local.
+	for _, r := range remote {
+		if r.PublicKey == selfPub {
+			continue
+		}
+		if localKeys[r.PublicKey] {
+			continue
+		}
+		newP := state.Peer{
 			Label:     r.Label,
 			PublicKey: r.PublicKey,
 			Endpoint:  r.Endpoint,
 			NodeIP:    r.NodeIP,
 			IsSeed:    r.IsSeed,
-			LastSeen:  time.Now().UTC(),
-		})
+			LastSeen:  now,
+		}
+		merged = append(merged, newP)
+		changed = append(changed, newP)
 	}
-	return added
+
+	return merged, changed
 }

@@ -2,12 +2,14 @@
 //
 // Cluster-secret = 32 байта random base32, единственный pre-shared материал
 // между нодами. Используется для:
-//   - HKDF-производных HMAC-ключей для challenge-response при bootstrap-handshake
-//   - PSK для WireGuard-туннелей между peer'ами (HKDF(secret, sorted-pubkeys))
-//   - Cert/identity-pinning при первом коннекте через Noise_IKpsk1
+//   - HKDF-производного PSK для Noise_IKpsk2 при bootstrap-handshake
+//     (см. internal/handshake)
+//   - Identity-pinning seed'а: новая нода знает seed_pubkey из join-token'а,
+//     Noise IK-pattern привязывает handshake к этому ключу
 //
-// Хранится на каждой ноде в /etc/meshd/cluster.secret (chmod 600), не в git,
-// не в backup'ах. При утечке — rotate-procedure через meshctl.
+// Хранится на каждой ноде внутри state.json (поле cluster_secret) — общий
+// chmod 600 для всего state-файла защищает и приватный wg-ключ, и cluster-secret.
+// Не в git, не в S3-backup. При утечке — rotate через meshctl (TODO, v0.2).
 package clusterkey
 
 import (
