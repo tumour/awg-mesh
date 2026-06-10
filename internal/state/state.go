@@ -24,22 +24,22 @@ const DefaultPath = "/etc/meshd/state.json"
 
 // State — корневая структура persistent state.
 type State struct {
-	Version   int    `json:"version"`             // схема файла, для миграций
-	NodeLabel string `json:"node_label"`          // человекочитаемая метка ('beget', 'hetzner')
+	Version   int    `json:"version"`    // схема файла, для миграций
+	NodeLabel string `json:"node_label"` // человекочитаемая метка ('beget', 'hetzner')
 
 	// Cluster identity
-	ClusterSecret string             `json:"cluster_secret"` // base32, 32 байта
-	AwgParams     awgparams.Params   `json:"awg_params"`
-	NetworkCIDR   string             `json:"network_cidr"`   // например "10.10.0.0/24"
+	ClusterSecret string           `json:"cluster_secret"` // base32, 32 байта
+	AwgParams     awgparams.Params `json:"awg_params"`
+	NetworkCIDR   string           `json:"network_cidr"` // например "100.64.0.0/24"
 
 	// Наша node identity
 	PrivateKey string `json:"private_key"` // base64 WG-encoded (32 байта)
 	PublicKey  string `json:"public_key"`  // base64 WG-encoded
-	NodeIP     string `json:"node_ip"`     // наш IP в mesh, например "10.10.0.1"
-	ListenPort int    `json:"listen_port"` // порт wg-handshake'а (0 = клиент)
+	NodeIP     string `json:"node_ip"`     // наш IP в mesh, например "100.64.0.1"
+	ListenPort int    `json:"listen_port"` // НАШ WG listen-port (0 = ephemeral, нода-initiator за NAT)
 
 	// Роль
-	IsSeed bool `json:"is_seed"` // если true — мы slave принимаем bootstrap-join'ы
+	IsSeed bool `json:"is_seed"` // true — принимаем bootstrap-join'ы и выделяем IP новым нодам
 
 	// Известные peer'ы (через gossip / bootstrap-response)
 	Peers []Peer `json:"peers"`

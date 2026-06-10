@@ -1,10 +1,11 @@
 // meshd — AmneziaWG mesh node daemon + CLI.
 //
 // Subcommand'ы:
-//   meshd init    — инициализирует новую mesh-сеть (первая нода = seed)
-//   meshd join    — подключается к существующей сети через seed
-//   meshd status  — печатает текущее состояние (peers, wg-handshakes)
-//   meshd version — версия бинарника
+//
+//	meshd init    — инициализирует новую mesh-сеть (первая нода = seed)
+//	meshd join    — подключается к существующей сети через seed
+//	meshd status  — печатает текущее состояние (peers, wg-handshakes)
+//	meshd version — версия бинарника
 package main
 
 import (

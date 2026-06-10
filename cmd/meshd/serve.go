@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -27,7 +26,7 @@ import (
 // валидирует cluster-secret через PSK, выделяет IP новой ноде, добавляет в
 // state.peers и отвечает HelloResponse'ом с peer-list'ом.
 //
-// MVP: одна горутина на соединение, mutex на state-update.
+// MVP: одна горутина на соединение, state-update сериализуется в state.Store.
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
@@ -35,7 +34,8 @@ func cmdServe(args []string) error {
 		"bootstrap listen address (default :<state.listen_port>)")
 	fs.Parse(args)
 
-	s, err := state.Load(*stateFlag)
+	store := state.NewStore(*stateFlag)
+	s, err := store.Read()
 	if err != nil {
 		return err
 	}
@@ -79,8 +79,6 @@ func cmdServe(args []string) error {
 		_ = listener.Close()
 	}()
 
-	var stateMu sync.Mutex
-
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -91,7 +89,7 @@ func cmdServe(args []string) error {
 			log.Printf("accept: %v", err)
 			continue
 		}
-		go handleConn(conn, *stateFlag, priv, pub, psk, &stateMu)
+		go handleConn(conn, store, priv, pub, psk)
 	}
 }
 
@@ -99,11 +97,10 @@ func cmdServe(args []string) error {
 // HelloRequest → state-update → HelloResponse.
 func handleConn(
 	conn net.Conn,
-	statePath string,
+	store *state.Store,
 	priv wgkey.Private,
 	pub wgkey.Public,
 	psk []byte,
-	stateMu *sync.Mutex,
 ) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -151,62 +148,87 @@ func handleConn(
 	if req.Version != proto.ProtoVersion {
 		log.Printf("[%s] proto-version mismatch: client=%d server=%d",
 			remoteAddr, req.Version, proto.ProtoVersion)
-		_ = proto.WriteMessage(conn, csServerToClient, proto.HelloResponse{
-			Version: proto.ProtoVersion,
-			Status:  "error",
-			Error: fmt.Sprintf("proto version mismatch (server=%d, client=%d)",
-				proto.ProtoVersion, req.Version),
-		})
+		respondErr(conn, csServerToClient, fmt.Sprintf(
+			"proto version mismatch (server=%d, client=%d)",
+			proto.ProtoVersion, req.Version))
 		return
 	}
 
-	stateMu.Lock()
-	defer stateMu.Unlock()
-
-	// Перечитываем state свежий — другая goroutine могла что-то добавить.
-	s, err := state.Load(statePath)
-	if err != nil {
-		log.Printf("[%s] reload state: %v", remoteAddr, err)
-		return
-	}
-
-	// Идемпотентно: если такой pubkey уже зарегистрирован, отдаём существующий IP.
-	for _, p := range s.Peers {
-		if p.PublicKey == req.PublicKey {
-			log.Printf("[%s] peer %s already registered (ip=%s), returning existing",
-				remoteAddr, req.Label, p.NodeIP)
-			respondOK(conn, csServerToClient, s, p.NodeIP)
+	// Endpoint опционален (NAT-ноды его не объявляют), но если есть — обязан
+	// быть валидным host:port — он уйдёт всем нодам в UAPI wg-device.
+	if req.Endpoint != "" {
+		if _, _, err := net.SplitHostPort(req.Endpoint); err != nil {
+			log.Printf("[%s] invalid endpoint %q from %s: %v",
+				remoteAddr, req.Endpoint, req.Label, err)
+			respondErr(conn, csServerToClient,
+				fmt.Sprintf("invalid endpoint %q (want host:port)", req.Endpoint))
 			return
 		}
 	}
 
-	allocIP, err := allocateNextIP(s)
-	if err != nil {
-		log.Printf("[%s] alloc IP: %v", remoteAddr, err)
-		_ = proto.WriteMessage(conn, csServerToClient, proto.HelloResponse{
-			Version: proto.ProtoVersion,
-			Status:  "error",
-			Error:   fmt.Sprintf("IP allocation: %v", err),
+	// Регистрация атомарна: проверка идемпотентности, аллокация IP и append
+	// происходят под одним локом Store — параллельный join или gossip-merge
+	// не потеряют запись и не выдадут дубликат IP.
+	var (
+		assignedIP string
+		rejoined   bool
+	)
+	snap, err := store.Update(func(s *state.State) error {
+		for i, p := range s.Peers {
+			if p.PublicKey != req.PublicKey {
+				continue
+			}
+			// Идемпотентный re-join: отдаём существующий IP. Endpoint
+			// обновляем только если нода прислала новый — пустой endpoint
+			// при resume не затирает объявленный ранее.
+			rejoined = true
+			assignedIP = p.NodeIP
+			if req.Endpoint != "" && req.Endpoint != p.Endpoint {
+				s.Peers[i].Endpoint = req.Endpoint
+				s.Peers[i].LastSeen = time.Now().UTC()
+				return nil
+			}
+			return state.ErrNoChange
+		}
+
+		ip, err := allocateNextIP(s)
+		if err != nil {
+			return fmt.Errorf("IP allocation: %w", err)
+		}
+		assignedIP = ip
+		s.Peers = append(s.Peers, state.Peer{
+			Label:     req.Label,
+			PublicKey: req.PublicKey,
+			Endpoint:  req.Endpoint,
+			NodeIP:    ip,
+			IsSeed:    false,
+			LastSeen:  time.Now().UTC(),
 		})
-		return
-	}
-
-	s.Peers = append(s.Peers, state.Peer{
-		Label:     req.Label,
-		PublicKey: req.PublicKey,
-		NodeIP:    allocIP,
-		IsSeed:    false,
-		LastSeen:  time.Now().UTC(),
+		return nil
 	})
-	if err := s.Save(statePath); err != nil {
-		log.Printf("[%s] save state: %v", remoteAddr, err)
+	if err != nil {
+		log.Printf("[%s] register peer %s: %v", remoteAddr, req.Label, err)
+		respondErr(conn, csServerToClient, err.Error())
 		return
 	}
 
-	log.Printf("[%s] registered peer %s as %s (pubkey=%s)",
-		remoteAddr, req.Label, allocIP, shortKey(req.PublicKey))
+	if rejoined {
+		log.Printf("[%s] peer %s already registered (ip=%s), returning existing",
+			remoteAddr, req.Label, assignedIP)
+	} else {
+		log.Printf("[%s] registered peer %s as %s (endpoint=%q, pubkey=%s)",
+			remoteAddr, req.Label, assignedIP, req.Endpoint, shortKey(req.PublicKey))
+	}
 
-	respondOK(conn, csServerToClient, s, allocIP)
+	respondOK(conn, csServerToClient, snap, assignedIP)
+}
+
+func respondErr(conn net.Conn, cs *noise.CipherState, msg string) {
+	_ = proto.WriteMessage(conn, cs, proto.HelloResponse{
+		Version: proto.ProtoVersion,
+		Status:  "error",
+		Error:   msg,
+	})
 }
 
 func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP string) {

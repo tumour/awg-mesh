@@ -61,14 +61,26 @@ sudo meshd init --label seed-node --public-endpoint <SEED_PUBLIC_IP>:51820
 
 ### 3. Onboarding следующих нод
 
-На любой Linux-VPS (любая страна, любой провайдер, нужен `dpkg -i meshd_*.deb` сначала):
+На любой Linux-VPS (любая страна, любой провайдер, нужен `dpkg -i meshd_*.deb` сначала).
+
+**Нода с публичным IP (рекомендуется для VPS)** — объяви endpoint, чтобы остальные
+могли строить к ней прямые туннели:
 
 ```bash
-sudo meshd join --label new-node --token <ТОКЕН-ИЗ-INIT>
+sudo ufw allow 51820/udp comment 'awg-mesh data'
+sudo meshd join --label new-node --token <ТОКЕН-ИЗ-INIT> \
+  --public-endpoint <PUBLIC_IP>:51820
 # auto-start включается сам
 ```
 
-UFW трогать **не надо** — обычная нода = initiator, исходящий outbound и так открыт.
+**Нода за NAT (домашняя машина, ноутбук)** — без `--public-endpoint`:
+
+```bash
+sudo meshd join --label laptop --token <ТОКЕН-ИЗ-INIT>
+```
+
+UFW на NAT-ноде трогать **не надо** — она initiator, исходящий outbound и так открыт.
+К ней нельзя инициировать туннель, но сама она достучится до любой ноды с endpoint'ом.
 
 Через минуту-две новая нода появится в `meshd status` на всех остальных нодах (через gossip).
 
@@ -129,8 +141,24 @@ make package-all   # .deb-пакеты в dist/ под amd64/arm64
 
 - **Seed-нода** (одна на mesh): listener на TCP :51820 (bootstrap) + UDP :51820 (WG).
   Принимает join'ы новых нод, выделяет им mesh-IP.
-- **Обычная нода**: только UDP-endpoint для wg, peer-to-peer туннели с другими.
-  Обновляет peer-list через gossip раз в минуту.
+- **Нода с public-endpoint** (`join --public-endpoint`): слушает фиксированный
+  UDP-порт, к ней можно инициировать прямой туннель. Endpoint расходится по mesh'у
+  через gossip.
+- **Нода за NAT** (join без endpoint'а): ephemeral UDP-порт, initiator-only —
+  сама строит туннели к нодам с endpoint'ом, к ней инициировать нельзя.
+
+### Связность
+
+Прямой туннель между двумя нодами возможен, если **хотя бы одна** объявила
+public-endpoint:
+
+| | B с endpoint | B за NAT |
+|---|---|---|
+| **A с endpoint** | напрямую (любая инициирует) | напрямую (инициирует B) |
+| **A за NAT** | напрямую (инициирует A) | ✗ нет связности (relay/STUN — v2) |
+
+Повторный `meshd join` с новым `--public-endpoint` обновляет endpoint ноды на
+seed'е (mesh-IP и ключи сохраняются), дальше gossip разносит его остальным.
 
 ### Источник правды:
 

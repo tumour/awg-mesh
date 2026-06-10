@@ -6,7 +6,8 @@
 // прошли Noise IKpsk2 с правильным cluster-secret, доверяем им.
 //
 // Wire-protocol: HTTP JSON. Endpoint:
-//   GET /v1/peers → {"peers":[{label,public_key,endpoint,node_ip,is_seed},...]}
+//
+//	GET /v1/peers → {"peers":[{label,public_key,endpoint,node_ip,is_seed},...]}
 //
 // Клиент мерджит ответ со своим peer-list'ом и применяет diff к wg-device.
 package gossip
@@ -28,9 +29,9 @@ const DefaultPort = 9100
 
 // Server — HTTP API для отдачи peer-listа.
 type Server struct {
-	statePath string
-	addr      string
-	srv       *http.Server
+	store *state.Store
+	addr  string
+	srv   *http.Server
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers.
@@ -49,9 +50,9 @@ type PeerInfo struct {
 }
 
 // NewServer создаёт сервер на mesh-IP:port. host обычно = state.NodeIP.
-func NewServer(host string, port int, statePath string) *Server {
+func NewServer(host string, port int, store *state.Store) *Server {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	return &Server{statePath: statePath, addr: addr}
+	return &Server{store: store, addr: addr}
 }
 
 // Start запускает сервер. Останавливается при отмене ctx.
@@ -85,7 +86,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	st, err := state.Load(s.statePath)
+	st, err := s.store.Read()
 	if err != nil {
 		log.Printf("gossip: load state: %v", err)
 		http.Error(w, "state unavailable", http.StatusInternalServerError)

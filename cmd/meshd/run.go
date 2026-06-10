@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -40,7 +39,8 @@ func cmdRun(args []string) error {
 		"how often to pull peer-list from a random peer (0 = disabled)")
 	fs.Parse(args)
 
-	s, err := state.Load(*stateFlag)
+	store := state.NewStore(*stateFlag)
+	s, err := store.Read()
 	if err != nil {
 		return err
 	}
@@ -56,9 +56,12 @@ func cmdRun(args []string) error {
 		logLevel = awgdev.LogLevelVerbose
 	}
 
-	// Seed слушает на listen_port; обычный peer без public-endpoint — ephemeral.
+	// Фиксированный UDP-порт — только если к нам вообще можно постучаться:
+	// seed или нода с объявленным public-endpoint (порт обязан совпадать
+	// с портом из endpoint'а, иначе peers будут долбиться в закрытую дверь).
+	// Нода за NAT — ephemeral-порт, она всегда сама инициирует handshake'и.
 	listenPort := 0
-	if s.IsSeed {
+	if s.IsSeed || selfEndpoint(s) != "" {
 		listenPort = s.ListenPort
 	}
 
@@ -104,12 +107,12 @@ func cmdRun(args []string) error {
 	defer cancel()
 
 	if s.IsSeed {
-		go runBootstrapListener(ctx, *stateFlag, priv, pub, device)
+		go runBootstrapListener(ctx, store, priv, pub, device)
 	}
 
 	// Gossip-server (отдаёт peer-list) и gossip-client (periodic pull).
 	// Сервер слушает только на mesh-IP — снаружи (через eth0) недоступен.
-	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, *stateFlag)
+	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, store)
 	go func() {
 		if err := gossipSrv.Start(ctx); err != nil {
 			log.Printf("gossip server: %v", err)
@@ -117,7 +120,7 @@ func cmdRun(args []string) error {
 	}()
 
 	if *gossipInterval > 0 {
-		gossipClient := gossip.NewClient(*stateFlag, pub.String(), *gossipInterval,
+		gossipClient := gossip.NewClient(store, pub.String(), *gossipInterval,
 			gossip.DefaultPort, func(newPeers []state.Peer) {
 				for _, p := range newPeers {
 					if err := device.UpdatePeer(p); err != nil {
@@ -143,12 +146,12 @@ func cmdRun(args []string) error {
 // нового peer'а через UpdatePeer (incremental UAPI).
 func runBootstrapListener(
 	ctx context.Context,
-	statePath string,
+	store *state.Store,
 	priv wgkey.Private,
 	pub wgkey.Public,
 	device *wg.Device,
 ) {
-	s, err := state.Load(statePath)
+	s, err := store.Read()
 	if err != nil {
 		log.Printf("bootstrap: reload state: %v", err)
 		return
@@ -174,7 +177,6 @@ func runBootstrapListener(
 
 	log.Printf("bootstrap: listening on %s/tcp", addr)
 
-	var stateMu sync.Mutex
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -185,9 +187,9 @@ func runBootstrapListener(
 			continue
 		}
 		go func(c net.Conn) {
-			handleConn(c, statePath, priv, pub, psk, &stateMu)
+			handleConn(c, store, priv, pub, psk)
 			// После регистрации peer'а — пушим в live wg-device
-			pushNewPeersToDevice(statePath, device, pub)
+			pushNewPeersToDevice(store, device, pub)
 		}(conn)
 	}
 }
@@ -195,8 +197,8 @@ func runBootstrapListener(
 // pushNewPeersToDevice — incremental UAPI update: добавляет в running device
 // каждого peer'а из state.json (idempotent — повторное добавление того же
 // pubkey'а просто обновляет allowed-ip/endpoint, не создаёт дубликат).
-func pushNewPeersToDevice(statePath string, dev *wg.Device, selfPub wgkey.Public) {
-	s, err := state.Load(statePath)
+func pushNewPeersToDevice(store *state.Store, dev *wg.Device, selfPub wgkey.Public) {
+	s, err := store.Read()
 	if err != nil {
 		log.Printf("push-peers: reload state: %v", err)
 		return
@@ -209,6 +211,18 @@ func pushNewPeersToDevice(statePath string, dev *wg.Device, selfPub wgkey.Public
 			log.Printf("push-peers: update %s: %v", p.Label, err)
 		}
 	}
+}
+
+// selfEndpoint — public-endpoint этой ноды из её собственной peer-записи
+// в state (туда его кладёт seed при регистрации, а для seed'а — meshd init).
+// Пусто = нода за NAT / endpoint не объявлен, к ней нельзя инициировать.
+func selfEndpoint(s *state.State) string {
+	for _, p := range s.Peers {
+		if p.PublicKey == s.PublicKey {
+			return p.Endpoint
+		}
+	}
+	return ""
 }
 
 // cidrPrefixSuffix вытаскивает "/24" из "100.64.0.0/24".

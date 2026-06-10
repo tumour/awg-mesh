@@ -15,25 +15,25 @@ import (
 // Client — periodic gossip-puller. Каждый tick выбирает random peer'а из
 // текущего state и делает GET /v1/peers через wg-туннель.
 type Client struct {
-	statePath string
-	selfPub   string // base64 — фильтруем себя из gossip-целей
-	interval  time.Duration
-	port      int
-	http      *http.Client
+	store    *state.Store
+	selfPub  string // base64 — фильтруем себя из gossip-целей
+	interval time.Duration
+	port     int
+	http     *http.Client
 	// onNewPeers вызывается с новыми peer'ами для пуша в wg-device.
 	onNewPeers func(peers []state.Peer)
 }
 
 // NewClient создаёт gossip-клиента. onNewPeers — callback для wg-device-update.
 func NewClient(
-	statePath string,
+	store *state.Store,
 	selfPub string,
 	interval time.Duration,
 	port int,
 	onNewPeers func([]state.Peer),
 ) *Client {
 	return &Client{
-		statePath:  statePath,
+		store:      store,
 		selfPub:    selfPub,
 		interval:   interval,
 		port:       port,
@@ -61,7 +61,7 @@ func (c *Client) Run(ctx context.Context) {
 
 // doRound — один цикл: выбрать peer'а, опросить, merge.
 func (c *Client) doRound() {
-	st, err := state.Load(c.statePath)
+	st, err := c.store.Read()
 	if err != nil {
 		log.Printf("gossip: load state: %v", err)
 		return
@@ -79,15 +79,23 @@ func (c *Client) doRound() {
 		return
 	}
 
-	merged, changed := mergePeers(st.Peers, resp.Peers, c.selfPub)
-	if len(changed) == 0 {
-		return // ничего нового и ничего не изменилось
-	}
-
-	// Заменяем peer-list полностью (мог обновиться endpoint существующих).
-	st.Peers = merged
-	if err := st.Save(c.statePath); err != nil {
+	// Merge — внутри Update, против свежего state: между fetch'ем и записью
+	// bootstrap-listener мог зарегистрировать нового peer'а, merge поверх
+	// устаревшего снапшота потерял бы его.
+	var changed []state.Peer
+	if _, err := c.store.Update(func(s *state.State) error {
+		merged, ch := mergePeers(s.Peers, resp.Peers, c.selfPub)
+		if len(ch) == 0 {
+			return state.ErrNoChange // ничего нового — не перезаписываем файл
+		}
+		s.Peers = merged
+		changed = ch
+		return nil
+	}); err != nil {
 		log.Printf("gossip: save state: %v", err)
+		return
+	}
+	if len(changed) == 0 {
 		return
 	}
 	log.Printf("gossip: %d peers added/updated (from %s)", len(changed), target.Label)
@@ -142,14 +150,24 @@ func pickRandomPeer(peers []state.Peer, selfPub string) *state.Peer {
 // mergePeers — мерж peer-list'а с remote-ноды через gossip.
 //
 // Возвращает (merged, changed):
-//   merged — полный новый список для state.Peers (с обновлёнными endpoint'ами
-//            существующих peer'ов и refresh'нутыми LastSeen).
-//   changed — что надо пушнуть в wg-device через UpdatePeer (новые peers + те
-//            у кого изменился endpoint). Pure refresh LastSeen в changed не идёт —
-//            wg-device от этого не зависит.
+//
+//	merged — полный новый список для state.Peers (с обновлёнными endpoint'ами
+//	         существующих peer'ов и refresh'нутыми LastSeen).
+//	changed — что надо пушнуть в wg-device через UpdatePeer (новые peers + те
+//	         у кого изменился endpoint). Pure refresh LastSeen в changed не идёт —
+//	         wg-device от этого не зависит.
 //
 // Себя из remote всегда отфильтровываем (selfPub). Себя из local — сохраняем
 // как есть. Удаление peer'ов (revoke / tombstone) — v0.2, сейчас union-with-update.
+//
+// Честность LastSeen: refresh означает "remote-нода знает этого peer'а", а НЕ
+// "peer жив" — прямого health-check'а нет. Не строить на этом expiry-логику
+// без отдельного механизма (v0.2).
+//
+// Конфликты endpoint'ов разрешаются last-pull-wins: записи не версионированы,
+// поэтому при двух разных значениях в сети итог зависит от порядка опросов.
+// Источник истины по факту seed (re-join обновляет endpoint у него) —
+// версионирование записей тоже v0.2.
 func mergePeers(local []state.Peer, remote []PeerInfo, selfPub string) (merged []state.Peer, changed []state.Peer) {
 	// Индекс remote по pubkey, заодно отфильтровываем себя.
 	rByKey := make(map[string]PeerInfo, len(remote))

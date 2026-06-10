@@ -13,9 +13,14 @@ const ProtoVersion = 1
 
 // HelloRequest — первое сообщение клиента после Noise-handshake'а.
 type HelloRequest struct {
-	Version   int    `json:"version"`     // ProtoVersion
-	Label     string `json:"label"`       // human-readable метка ноды
-	PublicKey string `json:"public_key"`  // base64 WG-pubkey клиента (для записи в peer-list)
+	Version   int    `json:"version"`    // ProtoVersion
+	Label     string `json:"label"`      // human-readable метка ноды
+	PublicKey string `json:"public_key"` // base64 WG-pubkey клиента (для записи в peer-list)
+	// Endpoint — публичный host:port WG-порта ноды (из join --public-endpoint).
+	// Раздаётся остальным нодам через gossip — они смогут инициировать прямой
+	// handshake. Пусто = нода за NAT, initiator-only. Поле опционально:
+	// старые клиенты его не шлют, ProtoVersion не меняется.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // HelloResponse — ответ seed'а с допуском и параметрами mesh-сети.

@@ -16,12 +16,13 @@ import (
 // Params — полный набор AmneziaWG-параметров.
 //
 // Рекомендованные диапазоны из docs.amnezia.org:
-//   Jc:    4-12   (количество junk-пакетов перед handshake)
-//   Jmin:  8-50   (минимальный размер junk-пакета, байты)
-//   Jmax:  50-200 (максимальный размер junk-пакета)
-//   S1:    15-150 (extra padding для handshake-init)
-//   S2:    15-150 (extra padding для handshake-response)
-//   H1-H4: random uint32, все уникальные (первые байты WG-message-type'ов)
+//
+//	Jc:    4-12   (количество junk-пакетов перед handshake)
+//	Jmin:  8-50   (минимальный размер junk-пакета, байты)
+//	Jmax:  50-200 (максимальный размер junk-пакета)
+//	S1:    15-150 (extra padding для handshake-init)
+//	S2:    15-150 (extra padding для handshake-response)
+//	H1-H4: random uint32, все уникальные (первые байты WG-message-type'ов)
 type Params struct {
 	Jc   int    `json:"jc"`
 	Jmin int    `json:"jmin"`
