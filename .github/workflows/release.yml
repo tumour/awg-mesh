@@ -36,6 +36,9 @@ jobs:
       - name: build .deb packages
         run: make package-all
 
+      - name: build .apk packages (OpenWrt)
+        run: make package-openwrt
+
       - name: list artifacts
         run: ls -la bin/ dist/
 
@@ -47,5 +50,8 @@ jobs:
             bin/meshd-linux-amd64
             bin/meshd-linux-arm64
             bin/meshd-linux-armv7
+            bin/meshd-linux-mipsle
+            bin/meshd-linux-mips
             dist/meshd_*_amd64.deb
             dist/meshd_*_arm64.deb
+            dist/meshd_*_openwrt-*.apk

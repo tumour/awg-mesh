@@ -1,0 +1,51 @@
+# nfpm config для сборки .apk-пакета под OpenWrt 25.12+ (apk-tools v3).
+# Используется через `nfpm pkg --packager apk --target out.apk`.
+#
+# nfpm генерит apk v2-формат — apk-tools v3 в OpenWrt читает его нативно.
+# Пакет не подписан, поэтому ставится через `apk add --allow-untrusted`.
+#
+# arch: all — OpenWrt различает десятки subtarget-арок (aarch64_cortex-a53,
+# mipsel_24kc, ...), точное совпадение строки нам не собрать. "all" принимается
+# любым устройством; правильную CPU-арку выбирает пользователь по имени файла
+# (meshd_X.Y.Z_openwrt-<goarch>.apk), таблица соответствий — в README.
+#
+# Параметры (${GOARCH}, ${VERSION}) подставляются через envsubst в Makefile.
+
+name: meshd
+arch: all
+platform: linux
+version: ${VERSION}
+maintainer: Alexandr <ivanov94.94@mail.ru>
+description: |
+  AmneziaWG-based mesh networking daemon.
+  DPI-resistant point-to-point tunnels with gossip peer discovery,
+  Noise IKpsk2 bootstrap handshake, Tailscale-style auth-tokens.
+vendor: tumour
+homepage: https://github.com/tumour/awg-mesh
+license: MIT
+
+# kmod-tun: /dev/net/tun на OpenWrt не входит в дефолтный образ.
+# Резолвится из стандартных фидов (нужен `apk update` перед установкой).
+# iproute2 не нужен: busybox-овский ip покрывает addr add / link set / link delete.
+depends:
+  - kmod-tun
+
+contents:
+  - src: ./bin/meshd-linux-${GOARCH}
+    dst: /usr/bin/meshd
+    file_info:
+      mode: 0755
+  - src: ./deploy/openwrt/meshd.init
+    dst: /etc/init.d/meshd
+    file_info:
+      mode: 0755
+  - src: ./LICENSE
+    dst: /usr/share/doc/meshd/LICENSE
+    file_info:
+      mode: 0644
+
+# apk-хуки: postinstall -> .post-install, preremove -> .pre-deinstall.
+# Аналога postrm purge у apk нет — state.json остаётся после удаления пакета.
+scripts:
+  postinstall: ./deploy/openwrt/post-install
+  preremove:   ./deploy/openwrt/pre-deinstall

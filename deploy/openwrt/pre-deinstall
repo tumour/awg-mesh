@@ -1,0 +1,12 @@
+#!/bin/sh
+# pre-deinstall для OpenWrt .apk (аналог deploy/debian/prerm).
+# state.json не трогаем — apk не имеет понятия purge; кто хочет полный wipe,
+# делает rm -rf /etc/meshd руками.
+
+/etc/init.d/meshd stop 2>/dev/null
+/etc/init.d/meshd disable 2>/dev/null
+
+# Снести TUN-интерфейс если daemon не успел graceful shutdown.
+ip link delete dev awg0 2>/dev/null
+
+exit 0

@@ -1,0 +1,33 @@
+#!/bin/sh
+# post-install для OpenWrt .apk (аналог deploy/debian/postinst).
+# Отличия от Debian-версии: procd вместо systemd, без UFW (на OpenWrt fw4 —
+# firewall-настройка описана в README, секция OpenWrt).
+
+# State-директория: внутри private-key + cluster-secret.
+mkdir -p /etc/meshd
+chmod 700 /etc/meshd
+
+# Enable чтобы стартовал при ребуте. Не start — без state.json демону
+# нечего делать (init-скрипт это тоже проверяет).
+[ -x /etc/init.d/meshd ] && /etc/init.d/meshd enable 2>/dev/null
+
+# Upgrade существующей установки: рестарт подхватит новый бинарь.
+if [ -f /etc/meshd/state.json ]; then
+    /etc/init.d/meshd restart 2>/dev/null
+    echo "meshd upgraded and restarted"
+else
+    cat <<'EOF'
+meshd installed
+
+  Next: bootstrap this node into a mesh:
+
+    meshd init  --label <name> --public-endpoint <public-ip>:51820
+    # ...or join an existing mesh:
+    meshd join --label <name> --token <TOKEN_FROM_INIT_OUTPUT>
+
+  Daemon starts automatically after init/join.
+  Firewall (fw4) setup: see README, OpenWrt section.
+EOF
+fi
+
+exit 0

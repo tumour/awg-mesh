@@ -45,6 +45,9 @@ sudo dpkg -i meshd_0.1.0_amd64.deb
 - systemd-юнит в `/lib/systemd/system/meshd.service` (enabled, но не started — daemon ждёт state.json)
 - директория `/etc/meshd/` (chmod 700, для state и ключей)
 
+Для OpenWrt-роутеров есть `.apk`-пакет — см. секцию
+[Установка на OpenWrt](#установка-на-openwrt-2512).
+
 ### 2. Bootstrap первой ноды (seed)
 
 ```bash
@@ -102,9 +105,94 @@ systemctl status meshd       # статус сервиса
 git clone https://github.com/tumour/awg-mesh && cd awg-mesh
 go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
 
-make build-all     # бинарники в bin/ под amd64/arm64/armv7
-make package-all   # .deb-пакеты в dist/ под amd64/arm64
+make build-all       # бинарники в bin/ под amd64/arm64/armv7/mipsle/mips
+make package-all     # .deb-пакеты в dist/ под amd64/arm64
+make package-openwrt # .apk-пакеты в dist/ под все арки
 ```
+
+## Установка на OpenWrt (25.12+)
+
+OpenWrt с релиза 25.x использует apk (apk-tools v3) вместо opkg — пакет
+собирается в формате `.apk`. Проверено на OpenWrt 25.12.4 (rootfs-контейнер):
+установка, procd-сервис, поднятие awg0 с mesh-IP.
+
+Требования: **≥16 MB flash** (бинарник ~8 MB распакованный) и желательно
+**≥128 MB RAM** — data plane это userspace-процесс (Go runtime + amneziawg-go).
+
+### Выбор пакета под арку роутера
+
+Пакет помечен `arch = noarch` (ставится на любую арку), правильный CPU-вариант
+выбираешь по имени файла:
+
+| Файл | OpenWrt target | Примеры устройств |
+|---|---|---|
+| `…openwrt-arm64.apk` | aarch64_* (mediatek/filogic, qualcommax, bcm27xx) | современные Wi-Fi 6/7 роутеры, RPi 4/5 |
+| `…openwrt-armv7.apk` | arm_cortex-a7/a9/a15 (ipq40xx, mvebu) | старые ARM-роутеры |
+| `…openwrt-mipsle.apk` | mipsel_24kc (ramips: mt7621, mt76x8) | Xiaomi, Keenetic и пр. |
+| `…openwrt-mips.apk` | mips_24kc, big-endian (ath79, lantiq) | TP-Link на Atheros |
+| `…openwrt-amd64.apk` | x86/64 | мини-ПК, VM |
+
+Узнать свою арку: `grep ARCH /etc/openwrt_release`.
+
+### Установка
+
+```bash
+# на роутере (подставь версию и арку):
+wget https://github.com/tumour/awg-mesh/releases/latest/download/meshd_0.2.0_openwrt-mipsle.apk
+
+apk update   # нужен для резолва зависимости kmod-tun
+apk add --allow-untrusted meshd_0.2.0_openwrt-mipsle.apk
+```
+
+`--allow-untrusted` обязателен — пакет не подписан ключом OpenWrt-фида.
+После установки:
+- бинарник в `/usr/bin/meshd`, procd-скрипт в `/etc/init.d/meshd` (enabled)
+- `kmod-tun` подтянется автоматически из стандартного фида
+- дальше обычный `meshd init` / `meshd join` — daemon стартует сам через procd
+
+### Firewall (fw4)
+
+Аналог UFW-правила `allow in on awg0` — отдельная зона для mesh-интерфейса:
+
+```bash
+uci add firewall zone
+uci set firewall.@zone[-1].name='mesh'
+uci add_list firewall.@zone[-1].device='awg0'
+uci set firewall.@zone[-1].input='ACCEPT'
+uci set firewall.@zone[-1].output='ACCEPT'
+uci set firewall.@zone[-1].forward='REJECT'
+uci commit firewall
+service firewall restart
+```
+
+Если роутер — seed или объявляет `--public-endpoint` (есть белый IP), открой
+bootstrap/data-порты со стороны WAN:
+
+```bash
+uci add firewall rule
+uci set firewall.@rule[-1].name='awg-mesh'
+uci set firewall.@rule[-1].src='wan'
+uci set firewall.@rule[-1].proto='tcp udp'
+uci set firewall.@rule[-1].dest_port='51820'
+uci set firewall.@rule[-1].target='ACCEPT'
+uci commit firewall
+service firewall restart
+```
+
+Роутер за NAT (typical home) — firewall трогать не надо, он initiator-only,
+как и NAT-нода на Debian.
+
+### Эксплуатация
+
+```bash
+/etc/init.d/meshd start|stop|restart|enable
+logread -e meshd          # логи (procd шлёт stdout в syslog)
+meshd status              # peer-list, mesh-IP
+```
+
+Удаление: `apk del meshd` — pre-deinstall останавливает сервис и сносит awg0;
+`/etc/meshd/state.json` остаётся (у apk нет аналога purge), полный wipe —
+`rm -rf /etc/meshd` руками.
 
 ## Архитектура
 
@@ -212,12 +300,16 @@ Mitigation — revoke pubkey (в v2 — tombstone-распространение
 
 ## Размеры артефактов
 
-| Артефакт | amd64 | arm64 | armv7 |
-|---|---|---|---|
-| Статический бинарник (Go, без CGO) | 7.9 MB | 7.3 MB | 7.6 MB |
-| .deb-пакет (compressed) | 3.3 MB | 3.0 MB | — |
+| Артефакт | amd64 | arm64 | armv7 | mipsle | mips |
+|---|---|---|---|---|---|
+| Статический бинарник (Go, без CGO) | 7.9 MB | 7.3 MB | 7.6 MB | 8.7 MB | 8.7 MB |
+| .deb-пакет (compressed) | 3.3 MB | 3.0 MB | — | — | — |
+| .apk-пакет OpenWrt (compressed) | 3.4 MB | 3.1 MB | 3.3 MB | 3.2 MB | 3.2 MB |
 
-`.deb` собирается через [nfpm](https://nfpm.goreleaser.com) (`make package-all`). В одном пакете: бинарник, systemd-юнит, postinst/prerm/postrm hook-скрипты, LICENSE + README.
+`.deb` и `.apk` собираются через [nfpm](https://nfpm.goreleaser.com)
+(`make package-all` / `make package-openwrt`). В .deb: бинарник, systemd-юнит,
+postinst/prerm/postrm hook-скрипты, LICENSE + README. В .apk: бинарник,
+procd-init-скрипт, post-install/pre-deinstall хуки, LICENSE.
 
 ## Uninstall
 
