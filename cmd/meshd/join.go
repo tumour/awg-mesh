@@ -36,6 +36,10 @@ func cmdJoin(args []string) error {
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	noAutoStart := fs.Bool("no-auto-start", false,
 		"skip starting meshd daemon via systemctl after join")
+	ufwMode := fs.String("ufw", "",
+		"opt-in UFW setup: 'gossip' (allow only peer-list sync, "+
+			"9100/tcp on awg0) or 'all' (allow all mesh traffic to this node); "+
+			"default: don't touch the firewall, just print a hint if needed")
 	fs.Parse(args)
 
 	if *label == "" {
@@ -43,6 +47,9 @@ func cmdJoin(args []string) error {
 	}
 	if *tokenStr == "" {
 		return fmt.Errorf("--token is required")
+	}
+	if err := validateUFWMode(*ufwMode); err != nil {
+		return err
 	}
 
 	// Порт из --public-endpoint станет нашим WG listen-port'ом — иначе
@@ -217,6 +224,9 @@ func cmdJoin(args []string) error {
   state file:   %s
 `, *label, resp.NetworkCIDR, resp.YourIP, endpointInfo, pub.String(),
 		tok.SeedEndpoint, len(peers), *stateFlag)
+
+	// Firewall до старта демона — иначе run сразу заворчит в лог про gossip.
+	applyUFWMode(*ufwMode)
 
 	if !*noAutoStart {
 		if !autoStartDaemon(*stateFlag) {

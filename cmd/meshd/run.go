@@ -97,10 +97,15 @@ func cmdRun(args []string) error {
 	}
 	log.Printf("meshd run: %s up, mesh-ip=%s%s", device.Name(), s.NodeIP, cidrSuffix)
 
-	// UFW reconciliation: добавить allow in on awg0 если ufw active и правила
-	// нет. Покрывает кейс когда UFW активировали ПОСЛЕ dpkg-install meshd
-	// (postinst тогда не отработал). Идемпотентно — повторный allow no-op.
-	ensureUFWRuleForMeshIface(device.Name())
+	// Firewall намеренно не трогаем (см. cmd/meshd/ufw.go): открытие gossip
+	// на mesh-интерфейсе — explicit opt-in через `init/join --ufw` или руками.
+	// Но если ufw активен и gossip закрыт — предупредим в лог.
+	if active, rules := ufwStatus(); active && !ufwMeshRuleExists(rules) {
+		log.Printf("warn: ufw is active and blocks incoming gossip on %s — "+
+			"peers can't pull peer-list from this node; "+
+			"fix: ufw allow in on %s to any port %d proto tcp",
+			device.Name(), device.Name(), gossip.DefaultPort)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGTERM, syscall.SIGINT)
@@ -231,36 +236,4 @@ func cidrPrefixSuffix(cidr string) string {
 		return cidr[idx:]
 	}
 	return "/24"
-}
-
-// ensureUFWRuleForMeshIface — idempotent reconciliation UFW-правила для
-// mesh-интерфейса. Аналог postinst-логики, но запускается на каждом meshd run
-// startup'е — покрывает кейс когда ufw активировали уже после dpkg-install.
-//
-// Без ufw / неактивный ufw — silent no-op. Ошибки exec'а тоже silent
-// (это best-effort, не критично для работы daemon'а).
-func ensureUFWRuleForMeshIface(iface string) {
-	if _, err := exec.LookPath("ufw"); err != nil {
-		return
-	}
-	out, err := exec.Command("ufw", "status").Output()
-	if err != nil {
-		return
-	}
-	statusOut := string(out)
-	if !strings.Contains(statusOut, "Status: active") {
-		return
-	}
-	// Проверяем нет ли уже правила для нашего интерфейса.
-	// ufw status показывает 'Anywhere on awg0' для 'allow in on awg0'.
-	if strings.Contains(statusOut, "Anywhere on "+iface) {
-		return
-	}
-	cmd := exec.Command("ufw", "allow", "in", "on", iface,
-		"comment", "mesh internal (auto by meshd run)")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("warn: ufw allow in on %s: %v: %s", iface, err, strings.TrimSpace(string(out)))
-		return
-	}
-	log.Printf("ufw: allow in on %s (reconciliation)", iface)
 }

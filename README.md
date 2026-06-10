@@ -58,6 +58,11 @@ sudo ufw allow 51820/udp comment 'awg-mesh data'
 # initialize mesh — этот узел становится seed:
 sudo meshd init --label seed-node --public-endpoint <SEED_PUBLIC_IP>:51820
 # auto-start выполняется автоматом
+
+# при активном UFW разреши входящий gossip с mesh-интерфейса — иначе соседи
+# не смогут забирать peer-list (meshd сам firewall НЕ трогает, только hint):
+sudo ufw allow in on awg0 to any port 9100 proto tcp comment 'awg-mesh gossip'
+# ...или то же одним флагом: meshd init ... --ufw gossip
 ```
 
 Из вывода скопируй **--token** — пригодится для следующих нод.
@@ -72,8 +77,9 @@ sudo meshd init --label seed-node --public-endpoint <SEED_PUBLIC_IP>:51820
 ```bash
 sudo ufw allow 51820/udp comment 'awg-mesh data'
 sudo meshd join --label new-node --token <ТОКЕН-ИЗ-INIT> \
-  --public-endpoint <PUBLIC_IP>:51820
-# auto-start включается сам
+  --public-endpoint <PUBLIC_IP>:51820 --ufw gossip
+# auto-start включается сам; --ufw gossip (опционально) разрешает в UFW
+# входящий peer-list-sync с mesh-интерфейса (9100/tcp on awg0)
 ```
 
 **Нода за NAT (домашняя машина, ноутбук)** — без `--public-endpoint`:
@@ -82,8 +88,11 @@ sudo meshd join --label new-node --token <ТОКЕН-ИЗ-INIT> \
 sudo meshd join --label laptop --token <ТОКЕН-ИЗ-INIT>
 ```
 
-UFW на NAT-ноде трогать **не надо** — она initiator, исходящий outbound и так открыт.
-К ней нельзя инициировать туннель, но сама она достучится до любой ноды с endpoint'ом.
+Публичные порты на NAT-ноде открывать **не надо** — она initiator, исходящий
+outbound и так открыт. К ней нельзя инициировать туннель, но сама она достучится
+до любой ноды с endpoint'ом. Если UFW активен — gossip-порт на awg0 нужен
+и здесь (`--ufw gossip` или команда из шага 2): соседи опрашивают её peer-list
+через уже установленный туннель.
 
 Через минуту-две новая нода появится в `meshd status` на всех остальных нодах (через gossip).
 
@@ -152,18 +161,32 @@ apk add --allow-untrusted meshd_0.2.0_openwrt-mipsle.apk
 
 ### Firewall (fw4)
 
-Аналог UFW-правила `allow in on awg0` — отдельная зона для mesh-интерфейса:
+meshd firewall не трогает и на OpenWrt (флаг `--ufw` работает только с UFW,
+на роутере он no-op) — настраиваем fw4 руками. Минимум для работы mesh:
+зона для awg0 + входящий gossip (9100/tcp), чтобы соседи забирали peer-list:
 
 ```bash
 uci add firewall zone
 uci set firewall.@zone[-1].name='mesh'
 uci add_list firewall.@zone[-1].device='awg0'
-uci set firewall.@zone[-1].input='ACCEPT'
+uci set firewall.@zone[-1].input='REJECT'
 uci set firewall.@zone[-1].output='ACCEPT'
 uci set firewall.@zone[-1].forward='REJECT'
+
+uci add firewall rule
+uci set firewall.@rule[-1].name='awg-mesh-gossip'
+uci set firewall.@rule[-1].src='mesh'
+uci set firewall.@rule[-1].proto='tcp'
+uci set firewall.@rule[-1].dest_port='9100'
+uci set firewall.@rule[-1].target='ACCEPT'
+
 uci commit firewall
 service firewall restart
 ```
+
+Если хочешь полный доступ к роутеру из mesh (Tailscale-style trust-by-tunneling,
+аналог `--ufw all`) — поставь у зоны `input='ACCEPT'`, gossip-правило тогда
+не нужно. Помни: сервисы роутера (LuCI, dropbear) станут видны всем нодам mesh.
 
 Если роутер — seed или объявляет `--public-endpoint` (есть белый IP), открой
 bootstrap/data-порты со стороны WAN:
@@ -264,9 +287,14 @@ seed'е (mesh-IP и ключи сохраняются), дальше gossip ра
 - **Gossip**: HTTP без extra-auth, **но gossip-сервер биндится только на mesh-IP**
   — с публичного интерфейса недоступен. Trust-by-tunneling: внутри wg-сети
   все peers уже прошли cluster-secret-проверку.
-- **UFW**: postinst добавляет `ufw allow in on awg0` — разрешает весь трафик
-  с mesh-интерфейса (Tailscale-pattern: default-allow внутри tunnel'я). Снаружи
-  (eth0) ничего не открывается. При `apt remove` правило снимается через prerm.
+- **UFW**: meshd и пакет firewall сами **не трогают** — никаких молчаливых
+  правил. Минимум для работы mesh — входящий gossip (`9100/tcp on awg0`):
+  открывается руками или явным opt-in `meshd init/join --ufw gossip`.
+  `--ufw all` разрешает весь трафик с mesh-интерфейса (Tailscale-pattern:
+  default-allow внутри tunnel'я) — осознанный выбор, если нужен доступ
+  к сервисам ноды по mesh-IP; помни, что тогда сервисы на 0.0.0.0 видны
+  всем участникам mesh. Снаружи (eth0) ничего не открывается в любом случае.
+  Если UFW активен, а gossip закрыт — `init/join` и `meshd run` предупредят.
 - **State at rest**: `state.json` `chmod 600`, owned by root. Не пиши никуда
   кроме `/etc/meshd/`.
 - **Cluster-secret leak**: эквивалентно root-доступу к mesh. Передавать токен
@@ -321,7 +349,9 @@ sudo apt remove meshd
 sudo apt purge meshd
 ```
 
-`prerm` сам делает `systemctl stop` + `disable` и `ip link delete awg0`. `postrm purge` удаляет state-директорию.
+`prerm` сам делает `systemctl stop` + `disable`, `ip link delete awg0` и снимает
+UFW-правила mesh-интерфейса, если они добавлялись (только при remove, не при
+upgrade). `postrm purge` удаляет state-директорию.
 
 ## Лицензия
 

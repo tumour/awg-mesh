@@ -13,9 +13,13 @@ fi
 # Снести TUN-интерфейс если daemon не успел graceful shutdown.
 ip link delete dev awg0 >/dev/null 2>&1 || true
 
-# Снять UFW-правило для mesh-интерфейса (добавили в postinst).
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+# Снять UFW-правила mesh-интерфейса, если их добавляли (через
+# `meshd init/join --ufw` или руками) — без meshd они мёртвый груз.
+# Только при настоящем remove: при upgrade ($1=upgrade) правила сохраняем.
+if [ "$1" = "remove" ] && command -v ufw >/dev/null 2>&1 \
+        && ufw status 2>/dev/null | grep -q 'Status: active'; then
     ufw delete allow in on awg0 >/dev/null 2>&1 || true
+    ufw delete allow in on awg0 to any port 9100 proto tcp >/dev/null 2>&1 || true
 fi
 
 exit 0

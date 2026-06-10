@@ -31,10 +31,17 @@ func cmdInit(args []string) error {
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	noAutoStart := fs.Bool("no-auto-start", false,
 		"skip starting meshd daemon via systemctl after init")
+	ufwMode := fs.String("ufw", "",
+		"opt-in UFW setup: 'gossip' (allow only peer-list sync, "+
+			"9100/tcp on awg0) or 'all' (allow all mesh traffic to this node); "+
+			"default: don't touch the firewall, just print a hint if needed")
 	fs.Parse(args)
 
 	if *label == "" {
 		return fmt.Errorf("--label is required")
+	}
+	if err := validateUFWMode(*ufwMode); err != nil {
+		return err
 	}
 	if *publicEndpoint == "" {
 		return fmt.Errorf("--public-endpoint is required (e.g. --public-endpoint 45.146.165.227:51820)")
@@ -112,6 +119,9 @@ func cmdInit(args []string) error {
   state file:       %s
 
 `, *label, *cidr, hubIP, *publicEndpoint, *stateFlag)
+
+	// Firewall до старта демона — иначе run сразу заворчит в лог про gossip.
+	applyUFWMode(*ufwMode)
 
 	if !*noAutoStart {
 		if !autoStartDaemon(*stateFlag) {

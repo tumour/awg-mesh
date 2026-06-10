@@ -37,20 +37,8 @@ EOF
     fi
 fi
 
-# UFW: разрешить весь входящий трафик с mesh-интерфейса awg0 (trust-by-tunneling:
-# peers внутри mesh уже прошли Noise IKpsk2 + cluster-secret). Снаружи (eth0)
-# gossip-API не достижим — listener binds на mesh-IP, плюс UFW дропает по default.
-#
-# Tailscale-pattern: default-allow на tunnel-interface, ACL для restriction —
-# опциональны (для нашего MVP scope не нужны).
-#
-# UFW rule добавляется в idle-state (даже когда awg0 ещё не существует) —
-# применится автоматически когда meshd run создаст интерфейс.
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    if ! ufw status | grep -q 'Anywhere on awg0'; then
-        ufw allow in on awg0 comment 'mesh internal (trust-by-tunneling)' >/dev/null 2>&1 || true
-        echo "✓ UFW: allow in on awg0 (mesh internal)"
-    fi
-fi
+# Firewall намеренно НЕ трогаем: открытие mesh-трафика — explicit opt-in
+# через `meshd init/join --ufw gossip|all` или руками. Без правила для gossip
+# (9100/tcp on awg0) meshd сам напечатает hint после init/join.
 
 exit 0
