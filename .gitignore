@@ -2,6 +2,7 @@
 /meshd
 /meshd-*
 /bin/
+/dist/
 *.test
 state.json
 
