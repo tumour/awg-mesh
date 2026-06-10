@@ -34,10 +34,10 @@ Control plane (peer discovery, авторизация) — самописный 
 
 ```bash
 # скачать (подставь нужную версию):
-wget https://github.com/tumour/awg-mesh/releases/latest/download/meshd_0.1.0_amd64.deb
+wget https://github.com/tumour/awg-mesh/releases/latest/download/meshd_0.2.0_amd64.deb
 
 # установить — postinst автоматом enable'ит systemd-unit:
-sudo dpkg -i meshd_0.1.0_amd64.deb
+sudo dpkg -i meshd_0.2.0_amd64.deb
 ```
 
 После `dpkg -i`:
