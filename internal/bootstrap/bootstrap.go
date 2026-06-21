@@ -21,8 +21,14 @@ import (
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
-// handshakeMaxFrame — лимит на незашифрованные кадры handshake (msg1/msg2).
-const handshakeMaxFrame = 2048
+const (
+	// handshakeMaxFrame — лимит на незашифрованные кадры handshake (msg1/msg2).
+	handshakeMaxFrame = 2048
+	// connDeadline — дедлайн на весь bootstrap-обмен с одним соединением.
+	connDeadline = 30 * time.Second
+	// dialTimeout — таймаут на коннект клиента к seed.
+	dialTimeout = 10 * time.Second
+)
 
 // Serve запускает bootstrap accept-loop на addr. onRegistered (если не nil)
 // вызывается после каждого join'а — демон через него пушит свежий peer-list в
@@ -54,8 +60,15 @@ func Serve(
 			continue
 		}
 		go func(c net.Conn) {
-			handleConn(c, store, priv, pub, psk)
-			if onRegistered != nil {
+			// recover: паника на кривом фрейме/вводе с публичного порта не должна
+			// класть весь демон — гасим её в пределах одного соединения.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("bootstrap: panic handling %s: %v", c.RemoteAddr(), r)
+				}
+			}()
+			// onRegistered (push в device) — только после УСПЕШНОЙ регистрации.
+			if handleConn(c, store, priv, pub, psk) && onRegistered != nil {
 				onRegistered()
 			}
 		}(conn)
@@ -79,12 +92,12 @@ func Join(
 		return nil, fmt.Errorf("init handshake: %w", err)
 	}
 
-	conn, err := net.DialTimeout("tcp", seedEndpoint, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", seedEndpoint, dialTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial seed: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(connDeadline))
 
 	// Message 1: client → server
 	msg1, _, _, err := hs.WriteMessage(nil, nil)
@@ -116,16 +129,17 @@ func Join(
 }
 
 // handleConn — обработка одного bootstrap-join'а: Noise IK handshake →
-// HelloRequest → mesh.RegisterPeer → HelloResponse.
+// HelloRequest → mesh.RegisterPeer → HelloResponse. Возвращает true, только если
+// регистрация прошла успешно (caller тогда дёргает onRegistered).
 func handleConn(
 	conn net.Conn,
 	store *state.Store,
 	priv wgkey.Private,
 	pub wgkey.Public,
 	psk []byte,
-) {
+) bool {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(connDeadline))
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[%s] new bootstrap-connection", remoteAddr)
@@ -133,18 +147,18 @@ func handleConn(
 	hs, err := handshake.ResponderHandshake(priv[:], pub[:], psk)
 	if err != nil {
 		log.Printf("[%s] responder-handshake init: %v", remoteAddr, err)
-		return
+		return false
 	}
 
 	// Message 1 (client → server)
 	msg1, err := readFramed(conn, handshakeMaxFrame)
 	if err != nil {
 		log.Printf("[%s] read msg1: %v", remoteAddr, err)
-		return
+		return false
 	}
 	if _, _, _, err := hs.ReadMessage(nil, msg1); err != nil {
 		log.Printf("[%s] noise msg1 fail (wrong secret or wrong seed pubkey?): %v", remoteAddr, err)
-		return
+		return false
 	}
 
 	// Message 2 (server → client) + установка CipherState'ов. flynn/noise
@@ -153,18 +167,18 @@ func handleConn(
 	out, csClientToServer, csServerToClient, err := hs.WriteMessage(nil, nil)
 	if err != nil {
 		log.Printf("[%s] write msg2: %v", remoteAddr, err)
-		return
+		return false
 	}
 	if err := writeFramed(conn, out); err != nil {
 		log.Printf("[%s] send msg2: %v", remoteAddr, err)
-		return
+		return false
 	}
 
 	// Шифрованный канал готов. Читаем HelloRequest.
 	var req proto.HelloRequest
 	if err := proto.ReadMessage(conn, csClientToServer, &req); err != nil {
 		log.Printf("[%s] read hello-req: %v", remoteAddr, err)
-		return
+		return false
 	}
 	if req.Version != proto.ProtoVersion {
 		log.Printf("[%s] proto-version mismatch: client=%d server=%d",
@@ -172,7 +186,7 @@ func handleConn(
 		respondErr(conn, csServerToClient, fmt.Sprintf(
 			"proto version mismatch (server=%d, client=%d)",
 			proto.ProtoVersion, req.Version))
-		return
+		return false
 	}
 
 	// Endpoint опционален (NAT-ноды его не объявляют), но если есть — обязан быть
@@ -183,7 +197,7 @@ func handleConn(
 				remoteAddr, req.Endpoint, req.Label, err)
 			respondErr(conn, csServerToClient,
 				fmt.Sprintf("invalid endpoint %q (want host:port)", req.Endpoint))
-			return
+			return false
 		}
 	}
 
@@ -207,9 +221,11 @@ func handleConn(
 		return nil
 	})
 	if err != nil {
+		// Полную причину — только в наш лог; клиенту generic (не сливаем
+		// внутренние строки ошибок в открытый канал).
 		log.Printf("[%s] register peer %s: %v", remoteAddr, req.Label, err)
-		respondErr(conn, csServerToClient, err.Error())
-		return
+		respondErr(conn, csServerToClient, "registration failed")
+		return false
 	}
 
 	if reg.Rejoined {
@@ -221,6 +237,7 @@ func handleConn(
 	}
 
 	respondOK(conn, csServerToClient, snap, reg.AssignedIP)
+	return true
 }
 
 func respondErr(conn net.Conn, cs *noise.CipherState, msg string) {

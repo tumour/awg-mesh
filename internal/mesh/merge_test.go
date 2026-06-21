@@ -87,6 +87,28 @@ func TestMergeLabelChangeNotPushedToDevice(t *testing.T) {
 	}
 }
 
+func TestMergeDeduplicatesRemoteDuplicates(t *testing.T) {
+	local := []state.Peer{{PublicKey: selfKey}}
+	// remote с дублем pubkey "NEW" — должен добавиться ровно один раз.
+	remote := []state.Peer{
+		{Label: "new", PublicKey: "NEW", NodeIP: "100.64.0.3", Endpoint: "h:1"},
+		{Label: "new-dup", PublicKey: "NEW", NodeIP: "100.64.0.3", Endpoint: "h:1"},
+	}
+	merged, changed := MergePeers(local, remote, selfKey)
+	cnt := 0
+	for _, p := range merged {
+		if p.PublicKey == "NEW" {
+			cnt++
+		}
+	}
+	if cnt != 1 {
+		t.Fatalf("duplicate pubkey in remote must be added once, got %d", cnt)
+	}
+	if len(changed) != 1 {
+		t.Fatalf("want 1 changed, got %d", len(changed))
+	}
+}
+
 func TestMergeKeepsLocalUnknownToRemote(t *testing.T) {
 	local := []state.Peer{
 		{Label: "c", PublicKey: "C", NodeIP: "100.64.0.4"},

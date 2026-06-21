@@ -1,6 +1,7 @@
 // Package state — persistent state ноды mesh-сети.
 //
-// Хранится в /etc/meshd/state.json (chmod 600). Содержит:
+// Хранится в DefaultPath (платформенный путь, см. path_unix.go/path_windows.go),
+// chmod 600. Содержит:
 //   - наш node-keypair (приватный + публичный)
 //   - cluster-secret (32 байта base32) — общий для всех нод в этой сети
 //   - AmneziaWG-параметры (Jc/Jmin/Jmax/S1/S2/H1-H4) — общие для всех нод
@@ -22,9 +23,14 @@ import (
 // DefaultPath — стандартное место хранения state.json (chmod 600). Зависит от
 // ОС, поэтому определён в path_unix.go / path_windows.go (build-tags).
 
+// CurrentVersion — текущая версия схемы state.json. Save проставляет её, Load
+// реджектит файлы с иной версией (вместо молчаливого проглатывания несовместимого
+// формата). Поднимать при несовместимых изменениях схемы.
+const CurrentVersion = 1
+
 // State — корневая структура persistent state.
 type State struct {
-	Version   int    `json:"version"`    // схема файла, для миграций
+	Version   int    `json:"version"`    // схема файла (== CurrentVersion); ставит Save
 	NodeLabel string `json:"node_label"` // человекочитаемая метка ('beget', 'hetzner')
 
 	// Cluster identity
@@ -75,6 +81,10 @@ func Load(path string) (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if s.Version != CurrentVersion {
+		return nil, fmt.Errorf("state %s: unsupported schema version %d (this meshd supports %d)",
+			path, s.Version, CurrentVersion)
+	}
 	return &s, nil
 }
 
@@ -87,6 +97,7 @@ func (s *State) Save(path string) error {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
 
+	s.Version = CurrentVersion
 	s.UpdatedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

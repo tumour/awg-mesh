@@ -1,51 +1,71 @@
 package mesh
 
 import (
+	"encoding/binary"
 	"fmt"
-	"net"
 	"net/netip"
 
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
-// FirstUsableIP — первый usable host-IP в CIDR (network + 1).
-// Для "10.10.0.0/24" вернёт "10.10.0.1". Используется на init для seed-ноды.
+// FirstUsableIP — первый usable host-IP в CIDR (network + 1). Для seed на init.
+// Работает для любого IPv4-префикса, не только /24.
 func FirstUsableIP(cidr string) (string, error) {
-	_, ipnet, err := net.ParseCIDR(cidr)
+	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil {
 		return "", err
 	}
-	ip := ipnet.IP.To4()
-	if ip == nil {
+	if !prefix.Addr().Is4() {
 		return "", fmt.Errorf("IPv4-only CIDR supported, got %s", cidr)
 	}
-	next := make(net.IP, 4)
-	copy(next, ip)
-	next[3]++
-	return next.String(), nil
+	first := prefix.Masked().Addr().Next() // network + 1
+	if !prefix.Contains(first) || first == lastAddr(prefix) {
+		return "", fmt.Errorf("CIDR %s too small for a host", cidr)
+	}
+	return first.String(), nil
 }
 
 // AllocateNextIP — следующий свободный IP в s.NetworkCIDR. Используется seed'ом
-// при регистрации новой ноды (bootstrap). .1 — обычно seed, поэтому начинаем
-// с .2; .255 (broadcast в /24) пропускаем.
+// при регистрации новой ноды. Пропускает network-адрес и broadcast (последний
+// адрес префикса), .1 обычно занят seed'ом — поэтому старт с network+2.
+// Broadcast вычисляется из префикса, корректно для любой маски (не только /24).
 func AllocateNextIP(s *state.State) (string, error) {
 	prefix, err := netip.ParsePrefix(s.NetworkCIDR)
 	if err != nil {
 		return "", fmt.Errorf("parse cidr: %w", err)
 	}
+	prefix = prefix.Masked()
+	if !prefix.Addr().Is4() {
+		return "", fmt.Errorf("IPv4-only CIDR supported, got %s", s.NetworkCIDR)
+	}
+
 	used := make(map[netip.Addr]bool)
 	for _, p := range s.Peers {
-		ip, err := netip.ParseAddr(p.NodeIP)
-		if err == nil {
+		if ip, err := netip.ParseAddr(p.NodeIP); err == nil {
 			used[ip] = true
 		}
 	}
-	addr := prefix.Addr().Next().Next() // начинаем с .2
+
+	bcast := lastAddr(prefix)
+	addr := prefix.Addr().Next().Next() // network+2 (.1 — seed)
 	for prefix.Contains(addr) {
-		if !used[addr] && addr.As4()[3] != 255 {
+		if addr == bcast {
+			break // broadcast не выдаём
+		}
+		if !used[addr] {
 			return addr.String(), nil
 		}
 		addr = addr.Next()
 	}
 	return "", fmt.Errorf("no free IPs in %s", s.NetworkCIDR)
+}
+
+// lastAddr — последний адрес префикса (broadcast для IPv4): network | hostmask.
+func lastAddr(p netip.Prefix) netip.Addr {
+	a := p.Masked().Addr().As4()
+	base := binary.BigEndian.Uint32(a[:])
+	hostMask := uint32(0xFFFFFFFF) >> uint(p.Bits())
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], base|hostMask)
+	return netip.AddrFrom4(b)
 }

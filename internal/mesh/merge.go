@@ -75,11 +75,15 @@ func MergePeers(local, remote []state.Peer, selfPub string) (merged, changed []s
 		}
 	}
 
-	// Новые peers — те что есть в remote, но не в local.
+	// Новые peers — те что есть в remote, но не в local. seenNew дедуплицирует
+	// дубликаты pubkey в самом remote-ответе (иначе добавили бы peer'а дважды),
+	// сохраняя порядок remote.
+	seenNew := make(map[string]bool)
 	for _, r := range remote {
-		if r.PublicKey == selfPub || localKeys[r.PublicKey] {
+		if r.PublicKey == selfPub || localKeys[r.PublicKey] || seenNew[r.PublicKey] {
 			continue
 		}
+		seenNew[r.PublicKey] = true
 		newP := state.Peer{
 			Label:     r.Label,
 			PublicKey: r.PublicKey,
