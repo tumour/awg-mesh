@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -82,9 +83,22 @@ func (c *Client) doRound() {
 	// Merge — внутри Update, против свежего state: между fetch'ем и записью
 	// bootstrap-listener мог зарегистрировать нового peer'а, merge поверх
 	// устаревшего снапшота потерял бы его.
+	// Конвертируем wire-тип gossip.PeerInfo → доменный state.Peer: mesh-домен
+	// не знает про gossip/proto-форматы.
+	remote := make([]state.Peer, 0, len(resp.Peers))
+	for _, r := range resp.Peers {
+		remote = append(remote, state.Peer{
+			Label:     r.Label,
+			PublicKey: r.PublicKey,
+			Endpoint:  r.Endpoint,
+			NodeIP:    r.NodeIP,
+			IsSeed:    r.IsSeed,
+		})
+	}
+
 	var changed []state.Peer
 	if _, err := c.store.Update(func(s *state.State) error {
-		merged, ch := mergePeers(s.Peers, resp.Peers, c.selfPub)
+		merged, ch := mesh.MergePeers(s.Peers, remote, c.selfPub)
 		if len(ch) == 0 {
 			return state.ErrNoChange // ничего нового — не перезаписываем файл
 		}
@@ -147,92 +161,5 @@ func pickRandomPeer(peers []state.Peer, selfPub string) *state.Peer {
 	return &picked
 }
 
-// mergePeers — мерж peer-list'а с remote-ноды через gossip.
-//
-// Возвращает (merged, changed):
-//
-//	merged — полный новый список для state.Peers (с обновлёнными endpoint'ами
-//	         существующих peer'ов и refresh'нутыми LastSeen).
-//	changed — что надо пушнуть в wg-device через UpdatePeer (новые peers + те
-//	         у кого изменился endpoint). Pure refresh LastSeen в changed не идёт —
-//	         wg-device от этого не зависит.
-//
-// Себя из remote всегда отфильтровываем (selfPub). Себя из local — сохраняем
-// как есть. Удаление peer'ов (revoke / tombstone) — v0.2, сейчас union-with-update.
-//
-// Честность LastSeen: refresh означает "remote-нода знает этого peer'а", а НЕ
-// "peer жив" — прямого health-check'а нет. Не строить на этом expiry-логику
-// без отдельного механизма (v0.2).
-//
-// Конфликты endpoint'ов разрешаются last-pull-wins: записи не версионированы,
-// поэтому при двух разных значениях в сети итог зависит от порядка опросов.
-// Источник истины по факту seed (re-join обновляет endpoint у него) —
-// версионирование записей тоже v0.2.
-func mergePeers(local []state.Peer, remote []PeerInfo, selfPub string) (merged []state.Peer, changed []state.Peer) {
-	// Индекс remote по pubkey, заодно отфильтровываем себя.
-	rByKey := make(map[string]PeerInfo, len(remote))
-	for _, r := range remote {
-		if r.PublicKey == selfPub {
-			continue
-		}
-		rByKey[r.PublicKey] = r
-	}
-
-	now := time.Now().UTC()
-	localKeys := make(map[string]bool, len(local))
-
-	// Проход по local — обновляем endpoint/label/IsSeed если remote знает свежее.
-	for _, p := range local {
-		localKeys[p.PublicKey] = true
-		if p.PublicKey == selfPub {
-			merged = append(merged, p)
-			continue
-		}
-		r, ok := rByKey[p.PublicKey]
-		if !ok {
-			// Remote не знает — оставляем как есть, LastSeen не refresh'аем
-			// (мы её не подтвердили этим раундом).
-			merged = append(merged, p)
-			continue
-		}
-		updated := p
-		updated.LastSeen = now
-		endpointChanged := r.Endpoint != "" && r.Endpoint != p.Endpoint
-		if endpointChanged {
-			updated.Endpoint = r.Endpoint
-		}
-		if r.Label != "" && r.Label != p.Label {
-			updated.Label = r.Label
-		}
-		if r.IsSeed != p.IsSeed {
-			updated.IsSeed = r.IsSeed
-		}
-		merged = append(merged, updated)
-		// В wg-device пушим только при endpoint-смене — label/IsSeed на wg не влияют.
-		if endpointChanged {
-			changed = append(changed, updated)
-		}
-	}
-
-	// Новые peers — те что есть в remote, но не в local.
-	for _, r := range remote {
-		if r.PublicKey == selfPub {
-			continue
-		}
-		if localKeys[r.PublicKey] {
-			continue
-		}
-		newP := state.Peer{
-			Label:     r.Label,
-			PublicKey: r.PublicKey,
-			Endpoint:  r.Endpoint,
-			NodeIP:    r.NodeIP,
-			IsSeed:    r.IsSeed,
-			LastSeen:  now,
-		}
-		merged = append(merged, newP)
-		changed = append(changed, newP)
-	}
-
-	return merged, changed
-}
+// Доменный merge peer-list'а живёт в internal/mesh.MergePeers — вызывается
+// из doRound выше (после конверсии gossip.PeerInfo → state.Peer).

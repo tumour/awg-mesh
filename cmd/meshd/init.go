@@ -8,6 +8,7 @@ import (
 	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
 	"github.com/tumour/awg-mesh/internal/jointoken"
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
@@ -68,7 +69,7 @@ func cmdInit(args []string) error {
 
 	// IP первой ноды = первый usable в CIDR. Для /24 это <network>.1.
 	// Парсить CIDR полноценно будем когда добавятся другие ноды; для init этого хватит.
-	hubIP, err := firstUsableIP(*cidr)
+	hubIP, err := mesh.FirstUsableIP(*cidr)
 	if err != nil {
 		return fmt.Errorf("parse cidr: %w", err)
 	}

@@ -139,14 +139,6 @@ func cmdSelfUpgrade(args []string) error {
 		fmt.Println("health-check peer: none — will only verify the local daemon comes back")
 	}
 
-	// Бэкап текущего (заведомо рабочего) бинаря — парашют для отката. Нужен в
-	// обоих режимах: в apk-режиме откат тоже файловый (восстановить связь
-	// важнее, чем согласованность apk-учёта — её потом чинит `apk fix`).
-	if err := copyFile(target, upgradeBackupPath, 0o755); err != nil {
-		return fmt.Errorf("backup current binary: %w", err)
-	}
-	fmt.Printf("backed up current binary → %s\n", upgradeBackupPath)
-
 	// Если нечем проверять связность (нет ни своего mesh-IP, ни соседа) —
 	// watchdog не сможет отличить успех от провала. Предупреждаем явно.
 	if selfIP == "" && peer == "" {

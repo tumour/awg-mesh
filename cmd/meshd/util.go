@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -14,23 +13,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// firstUsableIP — первый usable host-IP в CIDR (network + 1).
-// Для "10.10.0.0/24" вернёт "10.10.0.1".
-func firstUsableIP(cidr string) (string, error) {
-	_, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return "", err
-	}
-	ip := ipnet.IP.To4()
-	if ip == nil {
-		return "", fmt.Errorf("IPv4-only CIDR supported, got %s", cidr)
-	}
-	// network + 1
-	next := make(net.IP, 4)
-	copy(next, ip)
-	next[3]++
-	return next.String(), nil
-}
+// (firstUsableIP переехал в internal/mesh.FirstUsableIP — единый IPAM-домен.)
 
 // parsePort вытаскивает port из строки вида ":51820" или "0.0.0.0:51820".
 // Возвращает 0 если не парсится — для клиентов это означает "не слушаем".

@@ -2,59 +2,12 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"net"
 	"testing"
 	"time"
-
-	"github.com/tumour/awg-mesh/internal/state"
 )
 
-func TestAllocateNextIPSequential(t *testing.T) {
-	s := &state.State{
-		NetworkCIDR: "100.64.0.0/24",
-		Peers:       []state.Peer{{NodeIP: "100.64.0.1"}}, // seed
-	}
-
-	ip, err := allocateNextIP(s)
-	if err != nil {
-		t.Fatalf("alloc: %v", err)
-	}
-	if ip != "100.64.0.2" {
-		t.Fatalf("first regular peer must get .2, got %s", ip)
-	}
-
-	// .2 и .4 заняты — аллокатор берёт первую дырку
-	s.Peers = append(s.Peers,
-		state.Peer{NodeIP: "100.64.0.2"},
-		state.Peer{NodeIP: "100.64.0.4"},
-	)
-	ip, err = allocateNextIP(s)
-	if err != nil {
-		t.Fatalf("alloc: %v", err)
-	}
-	if ip != "100.64.0.3" {
-		t.Fatalf("want first free .3, got %s", ip)
-	}
-}
-
-func TestAllocateNextIPExhaustionSkips255(t *testing.T) {
-	s := &state.State{NetworkCIDR: "100.64.0.0/24"}
-	for i := 2; i <= 254; i++ {
-		s.Peers = append(s.Peers, state.Peer{NodeIP: fmt.Sprintf("100.64.0.%d", i)})
-	}
-	// Всё до .254 занято, .255 (broadcast) не выдаётся → исчерпание
-	if ip, err := allocateNextIP(s); err == nil {
-		t.Fatalf("want exhaustion error, got ip %s", ip)
-	}
-}
-
-func TestAllocateNextIPBadCIDR(t *testing.T) {
-	s := &state.State{NetworkCIDR: "not-a-cidr"}
-	if _, err := allocateNextIP(s); err == nil {
-		t.Fatal("want parse error, got nil")
-	}
-}
+// Тесты аллокации IP переехали в internal/mesh (alloc_test.go) вместе с логикой.
 
 func TestFramedRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()

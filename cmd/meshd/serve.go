@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/netip"
 	"os/signal"
 	"syscall"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/flynn/noise"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
 	"github.com/tumour/awg-mesh/internal/handshake"
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
 	"github.com/tumour/awg-mesh/internal/wgkey"
@@ -191,7 +191,7 @@ func handleConn(
 			return state.ErrNoChange
 		}
 
-		ip, err := allocateNextIP(s)
+		ip, err := mesh.AllocateNextIP(s)
 		if err != nil {
 			return fmt.Errorf("IP allocation: %w", err)
 		}
@@ -254,30 +254,6 @@ func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP stri
 	if err := proto.WriteMessage(conn, cs, resp); err != nil {
 		log.Printf("write hello-resp: %v", err)
 	}
-}
-
-// allocateNextIP — следующий свободный IP в state.NetworkCIDR.
-func allocateNextIP(s *state.State) (string, error) {
-	prefix, err := netip.ParsePrefix(s.NetworkCIDR)
-	if err != nil {
-		return "", fmt.Errorf("parse cidr: %w", err)
-	}
-	used := make(map[netip.Addr]bool)
-	for _, p := range s.Peers {
-		ip, err := netip.ParseAddr(p.NodeIP)
-		if err == nil {
-			used[ip] = true
-		}
-	}
-	// .1 — обычно seed; начинаем с .2 для регулярных peer'ов.
-	addr := prefix.Addr().Next().Next()
-	for prefix.Contains(addr) {
-		if !used[addr] && addr.As4()[3] != 255 {
-			return addr.String(), nil
-		}
-		addr = addr.Next()
-	}
-	return "", fmt.Errorf("no free IPs in %s", s.NetworkCIDR)
 }
 
 func shortKey(k string) string {
