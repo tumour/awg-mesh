@@ -3,20 +3,20 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
-## [Unreleased]
+## [0.3.0] — 2026-06-21
 
 ### Added
 - **Подписанный apk-фид для OpenWrt 25.12+** — установка и обновление
   `apk add/upgrade meshd` из собственного репозитория. Сборка и подпись в
   release-CI (`deploy/openwrt/build-feed.sh`: per-arch пакеты + `apk mkndx`
-  с подписью индекса), публикация на GitHub Pages (ветка `gh-pages`), зеркало
+  с подписью индекса), публикация на GitHub Pages (через GitHub Actions), зеркало
   jsDelivr для регионов с заблокированным GitHub. Приватный ключ — repo-secret
   `APK_SIGN_KEY`, публичный — `deploy/openwrt/awg-mesh-apk.rsa.pub`. nfpm-конфиг
   параметризован (`APK_ARCH`: `all` для standalone-.apk, конкретная арка для фида)
   и подписывает пакет (`postupgrade`-хук рестартует демон при `apk upgrade`).
 - **`meshd self-upgrade [<binary>]`** — безопасное обновление ноды, единственный
   канал к которой — сам mesh-туннель. Два режима: без аргумента — через apk-фид
-  (`apk update && apk upgrade meshd`), с путём — заменой бинарника (airgapped).
+  (`apk update && apk add --latest meshd`), с путём — заменой бинарника (airgapped).
   В обоих: detached-применение (переживает разрыв SSH при пересоздании awg0) +
   watchdog из старой копии бинаря, который по таймауту откатывает апгрейд, если
   mesh-связность не вернулась. Health-check — TCP-достижимость соседа по mesh
@@ -89,7 +89,7 @@
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
-[Unreleased]: https://github.com/tumour/awg-mesh/compare/v0.2.0...HEAD
+[0.3.0]: https://github.com/tumour/awg-mesh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tumour/awg-mesh/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/tumour/awg-mesh/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/tumour/awg-mesh/compare/v0.1.1...v0.1.2

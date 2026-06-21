@@ -6,12 +6,14 @@ on:
       - 'v*'
 
 permissions:
-  contents: write   # for creating Release + uploading assets + pushing gh-pages feed
+  contents: write   # for creating Release + uploading assets
 
 jobs:
   release:
     name: build .deb + create release
     runs-on: ubuntu-latest
+    outputs:
+      feed: ${{ steps.prep.outputs.feed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,10 +44,23 @@ jobs:
       - name: list artifacts
         run: ls -la bin/ dist/
 
+      # Тело релиза = секция CHANGELOG.md для этой версии (как у нормальных
+      # пакетов), а не авто-список коммитов.
+      - name: extract changelog for this release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") {flag=1; print; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || printf "## %s\n\nSee CHANGELOG.md for details.\n" "$VERSION" > RELEASE_NOTES.md
+          echo "--- release notes ---"; cat RELEASE_NOTES.md
+
       - name: create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: |
             bin/meshd-linux-amd64
             bin/meshd-linux-arm64
@@ -58,15 +73,16 @@ jobs:
 
       # --- Подписанный apk-фид для OpenWrt (apk-tools v3) ---
       # Требует repo-secret APK_SIGN_KEY (приватный RSA, парный к
-      # deploy/openwrt/awg-mesh-apk.rsa.pub) и Pages, настроенный на ветку
-      # gh-pages. Без секрета шаги тихо пропускаются (фид не публикуется).
+      # deploy/openwrt/awg-mesh-apk.rsa.pub) и Pages Source = "GitHub Actions"
+      # (Settings → Pages). Без секрета шаги тихо пропускаются (фид не публикуется).
       - name: prepare signing key
+        id: prep
         env:
           APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
         run: |
           if [ -z "$APK_SIGN_KEY" ]; then
             echo "APK_SIGN_KEY secret not set — skipping feed build"
-            echo "SKIP_FEED=1" >> "$GITHUB_ENV"
+            echo "feed=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # Имя файла важно: подпись индекса ищет <basename>.pub на устройстве.
@@ -77,9 +93,10 @@ jobs:
           # apk mkndx мог проверить подпись входных пакетов — он берёт .pub из той
           # же папки, что и приватный ключ, поэтому копируем его рядом.
           cp deploy/openwrt/awg-mesh-apk.rsa.pub /tmp/feedkeys/awg-mesh-apk.rsa.pub
+          echo "feed=1" >> "$GITHUB_OUTPUT"
 
       - name: build signed apk feed
-        if: env.SKIP_FEED != '1'
+        if: steps.prep.outputs.feed == '1'
         run: |
           VERSION=$(echo "${GITHUB_REF_NAME#v}" | grep -oE '^[0-9]+(\.[0-9]+)*')
           # дерево фида + публичный ключ кладём в public/openwrt/ для Pages
@@ -89,10 +106,26 @@ jobs:
           cp deploy/openwrt/awg-mesh-apk.rsa.pub public/openwrt/awg-mesh-apk.rsa.pub
           rm -f /tmp/feedkeys/awg-mesh-apk.rsa
 
-      - name: publish feed to GitHub Pages
-        if: env.SKIP_FEED != '1'
-        uses: peaceiris/actions-gh-pages@v4
+      - name: upload Pages artifact
+        if: steps.prep.outputs.feed == '1'
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
-          keep_files: true   # не затирать фиды других OpenWrt-версий
+          path: ./public
+
+  # Деплой фида на GitHub Pages через Actions (Source = "GitHub Actions" в
+  # Settings → Pages). Отдельный job с нужными правами; идёт только если фид собран.
+  deploy-pages:
+    name: deploy feed to GitHub Pages
+    needs: release
+    if: needs.release.outputs.feed == '1'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
