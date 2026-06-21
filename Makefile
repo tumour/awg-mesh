@@ -82,7 +82,7 @@ package-openwrt: $(DIST_DIR) build-all
 	[ -n "$$APK_VERSION" ] || APK_VERSION=0.0.0; \
 	for goarch in amd64 arm64 armv7 mipsle mips; do \
 		echo "==> packaging openwrt-$$goarch..."; \
-		export GOARCH=$$goarch VERSION=$$APK_VERSION; \
+		export GOARCH=$$goarch VERSION=$$APK_VERSION APK_ARCH=all; \
 		envsubst < nfpm-openwrt.yaml > $(DIST_DIR)/nfpm-openwrt-$$goarch.yaml; \
 		nfpm pkg --config $(DIST_DIR)/nfpm-openwrt-$$goarch.yaml --packager apk \
 			--target $(DIST_DIR)/meshd_$${APK_VERSION}_openwrt-$$goarch.apk || exit 1; \

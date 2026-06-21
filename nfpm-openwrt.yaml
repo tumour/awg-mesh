@@ -4,15 +4,18 @@
 # nfpm генерит apk v2-формат — apk-tools v3 в OpenWrt читает его нативно.
 # Пакет не подписан, поэтому ставится через `apk add --allow-untrusted`.
 #
-# arch: all — OpenWrt различает десятки subtarget-арок (aarch64_cortex-a53,
-# mipsel_24kc, ...), точное совпадение строки нам не собрать. "all" принимается
-# любым устройством; правильную CPU-арку выбирает пользователь по имени файла
-# (meshd_X.Y.Z_openwrt-<goarch>.apk), таблица соответствий — в README.
+# arch — режим зависит от способа доставки:
+#   * standalone .apk (ручная установка, `make package-openwrt`): APK_ARCH=all.
+#     "all" принимается любым устройством; нужный CPU-вариант пользователь
+#     выбирает по имени файла (meshd_X.Y.Z_openwrt-<goarch>.apk).
+#   * apk-фид (build-feed.sh): APK_ARCH=<конкретная OpenWrt-арка>, т.к. в фиде
+#     apk сам выбирает пакет по `cat /etc/apk/arch` и арка обязана совпадать.
 #
-# Параметры (${GOARCH}, ${VERSION}) подставляются через envsubst в Makefile.
+# Параметры (${GOARCH}, ${APK_ARCH}, ${VERSION}, ${APK_SIGN_KEY_FILE})
+# подставляются через envsubst (Makefile для standalone, build-feed.sh для фида).
 
 name: meshd
-arch: all
+arch: ${APK_ARCH}
 platform: linux
 version: ${VERSION}
 maintainer: Alexandr <ivanov94.94@mail.ru>
@@ -49,3 +52,18 @@ contents:
 scripts:
   postinstall: ./deploy/openwrt/post-install
   preremove:   ./deploy/openwrt/pre-deinstall
+
+# apk-специфика: подпись фида + postupgrade.
+apk:
+  # Подпись пакета. apk-tools v3 на устройстве проверяет её по публичному ключу
+  # /etc/apk/keys/awg-mesh-apk.rsa.pub. key_file подставляется через env:
+  # в CI APK_SIGN_KEY_FILE указывает на приватный ключ из secret; локально
+  # переменная пуста → nfpm собирает пакет без подписи (для отладки сборки).
+  signature:
+    key_file: ${APK_SIGN_KEY_FILE}
+    key_name: awg-mesh-apk
+  # ВАЖНО: при `apk upgrade` apk-tools v3 вызывает postupgrade, а НЕ postinstall
+  # (проверено эмпирически). Без этого обновление через фид не перезапустило бы
+  # демон. Переиспользуем post-install — он рестартует meshd при наличии state.json.
+  scripts:
+    postupgrade: ./deploy/openwrt/post-install

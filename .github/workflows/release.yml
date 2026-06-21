@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write   # for creating Release + uploading assets
+  contents: write   # for creating Release + uploading assets + pushing gh-pages feed
 
 jobs:
   release:
@@ -55,3 +55,44 @@ jobs:
             dist/meshd_*_amd64.deb
             dist/meshd_*_arm64.deb
             dist/meshd_*_openwrt-*.apk
+
+      # --- Подписанный apk-фид для OpenWrt (apk-tools v3) ---
+      # Требует repo-secret APK_SIGN_KEY (приватный RSA, парный к
+      # deploy/openwrt/awg-mesh-apk.rsa.pub) и Pages, настроенный на ветку
+      # gh-pages. Без секрета шаги тихо пропускаются (фид не публикуется).
+      - name: prepare signing key
+        env:
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+        run: |
+          if [ -z "$APK_SIGN_KEY" ]; then
+            echo "APK_SIGN_KEY secret not set — skipping feed build"
+            echo "SKIP_FEED=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          # Имя файла важно: подпись индекса ищет <basename>.pub на устройстве.
+          mkdir -p /tmp/feedkeys
+          printf '%s' "$APK_SIGN_KEY" > /tmp/feedkeys/awg-mesh-apk.rsa
+          chmod 600 /tmp/feedkeys/awg-mesh-apk.rsa
+          # build-feed.sh кладёт публичный ключ в /etc/apk/keys контейнера, чтобы
+          # apk mkndx мог проверить подпись входных пакетов — он берёт .pub из той
+          # же папки, что и приватный ключ, поэтому копируем его рядом.
+          cp deploy/openwrt/awg-mesh-apk.rsa.pub /tmp/feedkeys/awg-mesh-apk.rsa.pub
+
+      - name: build signed apk feed
+        if: env.SKIP_FEED != '1'
+        run: |
+          VERSION=$(echo "${GITHUB_REF_NAME#v}" | grep -oE '^[0-9]+(\.[0-9]+)*')
+          # дерево фида + публичный ключ кладём в public/openwrt/ для Pages
+          OUT=public/openwrt VERSION="$VERSION" \
+            APK_SIGN_KEY_FILE=/tmp/feedkeys/awg-mesh-apk.rsa \
+            sh deploy/openwrt/build-feed.sh
+          cp deploy/openwrt/awg-mesh-apk.rsa.pub public/openwrt/awg-mesh-apk.rsa.pub
+          rm -f /tmp/feedkeys/awg-mesh-apk.rsa
+
+      - name: publish feed to GitHub Pages
+        if: env.SKIP_FEED != '1'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          keep_files: true   # не затирать фиды других OpenWrt-версий

@@ -217,6 +217,124 @@ meshd status              # peer-list, mesh-IP
 `/etc/meshd/state.json` остаётся (у apk нет аналога purge), полный wipe —
 `rm -rf /etc/meshd` руками.
 
+## Восстановление токена
+
+`meshd init` печатает join-token один раз. Если вывод потерян — токен в файл
+не пишется, но его можно собрать заново из `state.json` (он = cluster-secret +
+pubkey/endpoint seed'а):
+
+```bash
+meshd token            # человекочитаемо: готовая `meshd join …`-команда
+meshd token --quiet    # только сам токен (для скриптов/копипасты)
+```
+
+Работает на **любой** ноде, не только на seed: cluster-secret общий, а seed-инфо
+есть в peer-list каждого узла (разносится gossip'ом). Это согласуется с моделью
+«кто владеет токеном — тот в mesh» (см. [Безопасность](#безопасность)).
+
+## Подключение apk-фида (OpenWrt 25.12+)
+
+Подписанный фид позволяет ставить и обновлять meshd как любой пакет —
+`apk upgrade meshd`, без ручного скачивания файлов. apk доверяет фиду **по
+подписи** (RSA-ключ), поэтому это работает даже без HTTPS-валидации. Настройка
+один раз на устройстве:
+
+```sh
+WRT_VER=$( . /etc/openwrt_release; echo "${DISTRIB_RELEASE%%-*}" | cut -d. -f1-2 )
+# репозиторий (арка подставляется из cat /etc/apk/arch):
+echo "https://tumour.github.io/awg-mesh/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
+  > /etc/apk/repositories.d/awg-mesh.list
+# доверяемый публичный ключ:
+wget https://tumour.github.io/awg-mesh/openwrt/awg-mesh-apk.rsa.pub \
+  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
+apk update
+apk add meshd        # установка (или обновление, если уже стоит)
+```
+
+> **Переход с ручной установки.** Если meshd был поставлен вручную из `.apk`-файла
+> (он помечен `arch: all`/noarch), обычный `apk upgrade meshd` его **не подхватит** —
+> apk считает arch-specific пакет фида другой архитектурой. Один раз выполни
+> `apk add --latest meshd` (перейдёт на пакет фида под твою арку), дальше
+> `apk upgrade` работает штатно. `meshd self-upgrade` делает это правильно сам.
+
+HTTPS к GitHub Pages требует SSL-пакета на роутере — при ошибке сертификата
+поставь корни: `apk add ca-bundle`. **Если GitHub заблокирован** (актуально для
+РФ) — зеркало через jsDelivr CDN:
+
+```sh
+echo "https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
+  > /etc/apk/repositories.d/awg-mesh.list
+wget https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/awg-mesh-apk.rsa.pub \
+  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
+apk update
+```
+
+Фид собирается и подписывается в release-CI (`deploy/openwrt/build-feed.sh`),
+публикуется на GitHub Pages (ветка `gh-pages`). Приватный ключ подписи — в
+repo-secret `APK_SIGN_KEY`, публичный лежит в репо
+(`deploy/openwrt/awg-mesh-apk.rsa.pub`).
+
+## Обновление
+
+### Обычный путь (есть второй канал к ноде)
+
+Если до ноды можно достучаться **не только через mesh** (LAN, WAN/белый IP,
+консоль) — просто переустанови пакет, зайдя по этому каналу. `state.json`
+(ключи, cluster-secret, peer-list) хуками пакета **не трогается**, демон
+сам перезапустится:
+
+```bash
+# Debian/Ubuntu:
+sudo dpkg -i meshd_0.X.Y_amd64.deb
+# OpenWrt:
+apk add --allow-untrusted meshd_0.X.Y_openwrt-<арка>.apk
+```
+
+⚠️ Не запускай это, **зайдя на ноду через сам mesh** (SSH на `100.64.0.x`):
+рестарт демона уронит `awg0` и оборвёт твою же сессию посреди установки.
+
+### Нода доступна ТОЛЬКО через mesh: `meshd self-upgrade`
+
+Когда mesh — единственный канал, у апгрейда два риска: (1) рестарт рвёт твою
+сессию посреди установки и (2) битый новый бинарь = потеря единственного
+доступа к ноде. `meshd self-upgrade` закрывает оба: ставит watchdog из
+**старой** (заведомо рабочей) копии бинаря, применяет апгрейд detached-процессом
+(переживает разрыв SSH), а если связь не вернулась — watchdog **сам откатывает**
+бинарь и рестартует демон. Два режима:
+
+**apk-режим (рекомендуется, если подключён [фид](#подключение-apk-фида-openwrt-2512)):**
+
+```bash
+ssh root@100.64.0.X            # по mesh
+meshd self-upgrade            # = apk update && apk add --latest meshd, но detached + watchdog
+```
+
+**file-режим (airgapped / без фида):**
+
+```bash
+scp meshd-linux-<арка> root@100.64.0.X:/tmp/meshd-new   # закинуть бинарь по mesh
+ssh root@100.64.0.X
+meshd self-upgrade /tmp/meshd-new
+```
+
+В обоих случаях SSH-сессия моргнёт на пару секунд (awg0 пересоздаётся). Через
+~20-30с переподключись и проверь:
+
+```bash
+meshd version
+meshd status
+cat /tmp/meshd-watchdog.log    # решение watchdog'а (kept / rolled back)
+```
+
+Если зайти не удалось — **ничего не делай**: watchdog по таймауту
+(`--health-timeout`, дефолт 3 мин) вернёт прежний бинарь и поднимет mesh,
+доступ восстановится сам. Health-check = TCP-достижимость соседа по mesh
+(seed выбирается автоматически; переопределить — `--health-peer <mesh-IP>`).
+
+Флаги: `--health-peer`, `--health-timeout`, `--health-grace`, `--state-file`.
+Команда требует root и сама проверяет, что новый бинарь запускается под эту
+арку (`<bin> version`) **до** подмены.
+
 ## Архитектура
 
 ```
@@ -324,6 +442,8 @@ Mitigation — revoke pubkey (в v2 — tombstone-распространение
 | `meshd run` | Главный foreground-daemon (запускает systemd) |
 | `meshd serve` | Только bootstrap-listener, без wg-device (для отладки) |
 | `meshd status` | Показывает peer-list и mesh-IP |
+| `meshd token` | Перепечатывает join-token из существующего state (онбординг новых нод) |
+| `meshd self-upgrade` | Замена бинарника с авто-откатом при потере mesh-связи |
 | `meshd version` | Версия бинарника |
 
 ## Размеры артефактов
