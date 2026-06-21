@@ -167,43 +167,22 @@ func handleConn(
 	}
 
 	// Регистрация атомарна: проверка идемпотентности, аллокация IP и append
-	// происходят под одним локом Store — параллельный join или gossip-merge
-	// не потеряют запись и не выдадут дубликат IP.
-	var (
-		assignedIP string
-		rejoined   bool
-	)
+	// (доменная логика — mesh.RegisterPeer) происходят под одним локом Store —
+	// параллельный join или gossip-merge не потеряют запись и не выдадут дубликат IP.
+	var reg mesh.Registration
 	snap, err := store.Update(func(s *state.State) error {
-		for i, p := range s.Peers {
-			if p.PublicKey != req.PublicKey {
-				continue
-			}
-			// Идемпотентный re-join: отдаём существующий IP. Endpoint
-			// обновляем только если нода прислала новый — пустой endpoint
-			// при resume не затирает объявленный ранее.
-			rejoined = true
-			assignedIP = p.NodeIP
-			if req.Endpoint != "" && req.Endpoint != p.Endpoint {
-				s.Peers[i].Endpoint = req.Endpoint
-				s.Peers[i].LastSeen = time.Now().UTC()
-				return nil
-			}
-			return state.ErrNoChange
-		}
-
-		ip, err := mesh.AllocateNextIP(s)
-		if err != nil {
-			return fmt.Errorf("IP allocation: %w", err)
-		}
-		assignedIP = ip
-		s.Peers = append(s.Peers, state.Peer{
+		r, err := mesh.RegisterPeer(s, mesh.JoinRequest{
 			Label:     req.Label,
 			PublicKey: req.PublicKey,
 			Endpoint:  req.Endpoint,
-			NodeIP:    ip,
-			IsSeed:    false,
-			LastSeen:  time.Now().UTC(),
 		})
+		if err != nil {
+			return err
+		}
+		reg = r
+		if !r.Changed {
+			return state.ErrNoChange // re-join без изменений — не пишем файл
+		}
 		return nil
 	})
 	if err != nil {
@@ -212,15 +191,15 @@ func handleConn(
 		return
 	}
 
-	if rejoined {
+	if reg.Rejoined {
 		log.Printf("[%s] peer %s already registered (ip=%s), returning existing",
-			remoteAddr, req.Label, assignedIP)
+			remoteAddr, req.Label, reg.AssignedIP)
 	} else {
 		log.Printf("[%s] registered peer %s as %s (endpoint=%q, pubkey=%s)",
-			remoteAddr, req.Label, assignedIP, req.Endpoint, shortKey(req.PublicKey))
+			remoteAddr, req.Label, reg.AssignedIP, req.Endpoint, shortKey(req.PublicKey))
 	}
 
-	respondOK(conn, csServerToClient, snap, assignedIP)
+	respondOK(conn, csServerToClient, snap, reg.AssignedIP)
 }
 
 func respondErr(conn net.Conn, cs *noise.CipherState, msg string) {
