@@ -3,9 +3,16 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
+
+// fileExists — есть ли файл/каталог по пути (best-effort, ошибки = «нет»).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // firstUsableIP — первый usable host-IP в CIDR (network + 1).
 // Для "10.10.0.0/24" вернёт "10.10.0.1".

@@ -45,6 +45,13 @@ func main() {
 		err = cmdServe(args)
 	case "status":
 		err = cmdStatus(args)
+	case "token":
+		err = cmdToken(args)
+	case "self-upgrade":
+		err = cmdSelfUpgrade(args)
+	case "__watchdog":
+		// Служебная: отдельный процесс, поднятый self-upgrade'ом для авто-отката.
+		err = cmdWatchdog(args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -64,12 +71,14 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `meshd %s — AmneziaWG mesh node
 
 Commands:
-  init     Initialize a new mesh network (first node, becomes seed)
-  join     Join an existing mesh network via a seed
-  run      Run meshd daemon: bring up wg-interface + (if seed) bootstrap listener
-  serve    Run only bootstrap-listener (without wg-device; for debug/testing)
-  status   Print current state and peer info
-  version  Print version
+  init          Initialize a new mesh network (first node, becomes seed)
+  join          Join an existing mesh network via a seed
+  run           Run meshd daemon: bring up wg-interface + (if seed) bootstrap listener
+  serve         Run only bootstrap-listener (without wg-device; for debug/testing)
+  status        Print current state and peer info
+  token         Re-print the join-token from existing state (for onboarding nodes)
+  self-upgrade  Replace the binary with a new one, auto-rollback on lost mesh connectivity
+  version       Print version
 
 Run 'meshd <command> -h' for command-specific flags.
 `, version)

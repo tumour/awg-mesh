@@ -2,12 +2,40 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/tumour/awg-mesh/internal/state"
 )
+
+// hasSystemdUnit — доступен ли systemctl и установлен ли unit meshd.service
+// (без .deb-пакета его может не быть).
+func hasSystemdUnit() bool {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	return exec.Command("systemctl", "cat", "meshd.service").Run() == nil
+}
+
+// hasProcdInit — OpenWrt с procd: init-скрипт meshd + /etc/rc.common (последний
+// отличает OpenWrt от систем, где /etc/init.d/meshd мог бы быть sysvinit'ом).
+func hasProcdInit() bool {
+	return fileExists("/etc/init.d/meshd") && fileExists("/etc/rc.common")
+}
+
+// daemonRestartArgv — команда рестарта meshd для текущей init-системы
+// (systemd или procd), или nil если ни одна не обнаружена. Используется
+// self-upgrade'ом, чтобы перезапустить демон новым (или откаченным) бинарём.
+func daemonRestartArgv() []string {
+	switch {
+	case hasSystemdUnit():
+		return []string{"systemctl", "restart", "meshd"}
+	case hasProcdInit():
+		return []string{"/etc/init.d/meshd", "restart"}
+	default:
+		return nil
+	}
+}
 
 // autoStartDaemon — пытается запустить meshd через init-систему сразу после
 // init/join, чтобы у пользователя был один-шаг bootstrap. Поддерживаются
@@ -26,12 +54,9 @@ func autoStartDaemon(stateFile string) bool {
 // trySystemdStart — запуск через systemctl. Работает только когда systemctl
 // доступен в PATH и meshd.service unit-file установлен (через .deb-пакет).
 func trySystemdStart() bool {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		// Не systemd-система: openwrt с procd, alpine с openrc, docker и т.д.
-		return false
-	}
-	// Проверяем что unit-file установлен. Без .deb-пакета его может не быть.
-	if err := exec.Command("systemctl", "cat", "meshd.service").Run(); err != nil {
+	// Не systemd-система (openwrt с procd, alpine с openrc, docker) или unit
+	// не установлен (нет .deb-пакета) — пусть пробует следующий способ.
+	if !hasSystemdUnit() {
 		return false
 	}
 
@@ -60,10 +85,7 @@ func trySystemdStart() bool {
 // /etc/init.d/meshd ставится .apk-пакетом; /etc/rc.common отличает
 // OpenWrt от систем где /etc/init.d/meshd мог бы быть sysvinit-скриптом.
 func tryProcdStart() bool {
-	if _, err := os.Stat("/etc/init.d/meshd"); err != nil {
-		return false
-	}
-	if _, err := os.Stat("/etc/rc.common"); err != nil {
+	if !hasProcdInit() {
 		return false
 	}
 
