@@ -104,6 +104,8 @@ jobs:
             APK_SIGN_KEY_FILE=/tmp/feedkeys/awg-mesh-apk.rsa \
             sh deploy/openwrt/build-feed.sh
           cp deploy/openwrt/awg-mesh-apk.rsa.pub public/openwrt/awg-mesh-apk.rsa.pub
+          # landing-страница в корне Pages (иначе корневой URL = 404)
+          cp deploy/openwrt/feed-index.html public/index.html
           rm -f /tmp/feedkeys/awg-mesh-apk.rsa
 
       - name: upload Pages artifact

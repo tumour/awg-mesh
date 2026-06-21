@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>awg-mesh — apk feed для OpenWrt</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 720px;
+         margin: 2rem auto; padding: 0 1rem; color: #1c1e21; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  code { background: #f0f1f3; padding: .1em .3em; border-radius: 3px; }
+  pre { background: #1c1e21; color: #e6e6e6; padding: 1rem; border-radius: 6px;
+        overflow-x: auto; font-size: .85rem; }
+  a { color: #2563eb; } .muted { color: #65676b; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>awg-mesh — apk-фид для OpenWrt</h1>
+<p>Подписанный репозиторий пакета <code>meshd</code> (AmneziaWG mesh-сеть)
+для OpenWrt&nbsp;25.12+ (apk-tools&nbsp;v3). Установка и обновление —
+<code>apk add/upgrade meshd</code>.</p>
+
+<h2>Подключение (на роутере)</h2>
+<pre>WRT_VER=$( . /etc/openwrt_release; echo "${DISTRIB_RELEASE%%-*}" | cut -d. -f1-2 )
+echo "https://tumour.github.io/awg-mesh/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
+  &gt; /etc/apk/repositories.d/awg-mesh.list
+wget https://tumour.github.io/awg-mesh/openwrt/awg-mesh-apk.rsa.pub \
+  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
+apk update &amp;&amp; apk add --latest meshd</pre>
+
+<h2>Если GitHub заблокирован (зеркало jsDelivr)</h2>
+<pre>WRT_VER=$( . /etc/openwrt_release; echo "${DISTRIB_RELEASE%%-*}" | cut -d. -f1-2 )
+echo "https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
+  &gt; /etc/apk/repositories.d/awg-mesh.list
+wget https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/awg-mesh-apk.rsa.pub \
+  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
+apk update</pre>
+
+<p class="muted">Подробности и установка на других системах —
+<a href="https://github.com/tumour/awg-mesh">github.com/tumour/awg-mesh</a>.</p>
+</body>
+</html>
