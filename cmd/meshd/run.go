@@ -3,33 +3,18 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
-	"net"
-	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	awgdev "github.com/amnezia-vpn/amneziawg-go/device"
-
-	"github.com/tumour/awg-mesh/internal/clusterkey"
 	"github.com/tumour/awg-mesh/internal/gossip"
-	"github.com/tumour/awg-mesh/internal/handshake"
+	"github.com/tumour/awg-mesh/internal/node"
 	"github.com/tumour/awg-mesh/internal/state"
-	"github.com/tumour/awg-mesh/internal/wg"
-	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
-// cmdRun — главный foreground-daemon: поднимает AmneziaWG-device,
-// конфигурирует через state.peers, если seed — параллельно слушает
-// bootstrap-сокет для новых join'ов.
-//
-// Идемпотентность: device пересоздаётся каждый запуск. Peers применяются
-// заново. State на диске — source of truth.
-//
-// Завершение: SIGTERM/SIGINT → graceful shutdown (device.Close + ip link down).
+// cmdRun — запускает демон meshd. Тонкая обёртка над node.Run: парс флагов,
+// обработка сигналов и host-integration (UFW-warn). Вся оркестрация — в node.
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
@@ -39,201 +24,26 @@ func cmdRun(args []string) error {
 		"how often to pull peer-list from a random peer (0 = disabled)")
 	fs.Parse(args)
 
-	store := state.NewStore(*stateFlag)
-	s, err := store.Read()
-	if err != nil {
-		return err
-	}
-
-	priv, err := wgkey.ParsePrivate(s.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("parse private key: %w", err)
-	}
-	pub := priv.Public()
-
-	logLevel := awgdev.LogLevelError
-	if *verbose {
-		logLevel = awgdev.LogLevelVerbose
-	}
-
-	// Фиксированный UDP-порт — только если к нам вообще можно постучаться:
-	// seed или нода с объявленным public-endpoint (порт обязан совпадать
-	// с портом из endpoint'а, иначе peers будут долбиться в закрытую дверь).
-	// Нода за NAT — ephemeral-порт, она всегда сама инициирует handshake'и.
-	listenPort := 0
-	if s.IsSeed || selfEndpoint(s) != "" {
-		listenPort = s.ListenPort
-	}
-
-	// Startup-cleanup: если предыдущий запуск crashed без graceful shutdown,
-	// TUN-интерфейс остался — удаляем чтобы tun.CreateTUN не фейлил.
-	// Игнорируем ошибку "Cannot find device" (интерфейса просто нет).
-	if out, err := exec.Command("ip", "link", "delete", "dev", *iface).CombinedOutput(); err != nil {
-		if !strings.Contains(string(out), "Cannot find device") {
-			log.Printf("warn: cleanup stale interface %s: %v: %s",
-				*iface, err, strings.TrimSpace(string(out)))
-		}
-	}
-
-	device, err := wg.New(*iface, listenPort, logLevel)
-	if err != nil {
-		return fmt.Errorf("create wg device: %w", err)
-	}
-	defer device.Close()
-
-	log.Printf("meshd run: created interface %s (mesh-ip=%s, peers=%d, seed=%v)",
-		device.Name(), s.NodeIP, len(s.Peers), s.IsSeed)
-
-	if err := device.Configure(priv, s.AwgParams, s.Peers, pub); err != nil {
-		return fmt.Errorf("configure device: %w", err)
-	}
-	if err := device.Up(); err != nil {
-		return fmt.Errorf("bring device up: %w", err)
-	}
-
-	cidrSuffix := cidrPrefixSuffix(s.NetworkCIDR)
-	if err := device.AssignIP(s.NodeIP + cidrSuffix); err != nil {
-		return fmt.Errorf("assign ip: %w", err)
-	}
-	log.Printf("meshd run: %s up, mesh-ip=%s%s", device.Name(), s.NodeIP, cidrSuffix)
-
-	// Firewall намеренно не трогаем (см. cmd/meshd/ufw.go): открытие gossip
-	// на mesh-интерфейсе — explicit opt-in через `init/join --ufw` или руками.
-	// Но если ufw активен и gossip закрыт — предупредим в лог.
-	if active, rules := ufwStatus(); active && !ufwMeshRuleExists(rules) {
-		log.Printf("warn: ufw is active and blocks incoming gossip on %s — "+
-			"peers can't pull peer-list from this node; "+
-			"fix: ufw allow in on %s to any port %d proto tcp",
-			device.Name(), device.Name(), gossip.DefaultPort)
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	if s.IsSeed {
-		go runBootstrapListener(ctx, store, priv, pub, device)
-	}
-
-	// Gossip-server (отдаёт peer-list) и gossip-client (periodic pull).
-	// Сервер слушает только на mesh-IP — снаружи (через eth0) недоступен.
-	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, store)
-	go func() {
-		if err := gossipSrv.Start(ctx); err != nil {
-			log.Printf("gossip server: %v", err)
-		}
-	}()
-
-	if *gossipInterval > 0 {
-		gossipClient := gossip.NewClient(store, pub.String(), *gossipInterval,
-			gossip.DefaultPort, func(newPeers []state.Peer) {
-				for _, p := range newPeers {
-					if err := device.UpdatePeer(p); err != nil {
-						log.Printf("gossip: push %s to device: %v", p.Label, err)
-					}
-				}
-			})
-		go gossipClient.Run(ctx)
-	}
-
-	log.Printf("meshd run: ready, waiting for signals")
-	<-ctx.Done()
-	log.Printf("meshd run: received signal, shutting down")
-
-	if out, err := exec.Command("ip", "link", "set", "down", "dev", device.Name()).CombinedOutput(); err != nil {
-		log.Printf("warn: ip link down: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return node.Run(ctx, node.Options{
+		StateFile:      *stateFlag,
+		Interface:      *iface,
+		Verbose:        *verbose,
+		GossipInterval: *gossipInterval,
+		FirewallWarn:   warnFirewallUFW,
+	})
 }
 
-// runBootstrapListener — версия cmdServe адаптированная для встроенного
-// запуска внутри meshd run. Также обновляет live wg-device при добавлении
-// нового peer'а через UpdatePeer (incremental UAPI).
-func runBootstrapListener(
-	ctx context.Context,
-	store *state.Store,
-	priv wgkey.Private,
-	pub wgkey.Public,
-	device *wg.Device,
-) {
-	s, err := store.Read()
-	if err != nil {
-		log.Printf("bootstrap: reload state: %v", err)
-		return
+// warnFirewallUFW — host-integration: если UFW активен и блокирует gossip на
+// mesh-интерфейсе, предупреждаем в лог (firewall meshd сам не трогает; см. ufw.go).
+func warnFirewallUFW(iface string) {
+	active, rules := ufwStatus()
+	if active && !ufwMeshRuleExists(rules) {
+		log.Printf("warn: ufw is active and blocks incoming gossip on %s — peers "+
+			"can't pull peer-list; fix: ufw allow in on %s to any port %d proto tcp",
+			iface, iface, gossip.DefaultPort)
 	}
-	cs, err := clusterkey.Parse(s.ClusterSecret)
-	if err != nil {
-		log.Printf("bootstrap: parse cluster secret: %v", err)
-		return
-	}
-	psk, err := handshake.DerivePSK(cs[:])
-	if err != nil {
-		log.Printf("bootstrap: derive psk: %v", err)
-		return
-	}
-
-	addr := fmt.Sprintf(":%d", s.ListenPort)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Printf("bootstrap: listen %s: %v", addr, err)
-		return
-	}
-	go func() { <-ctx.Done(); _ = listener.Close() }()
-
-	log.Printf("bootstrap: listening on %s/tcp", addr)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("bootstrap: accept: %v", err)
-			continue
-		}
-		go func(c net.Conn) {
-			handleConn(c, store, priv, pub, psk)
-			// После регистрации peer'а — пушим в live wg-device
-			pushNewPeersToDevice(store, device, pub)
-		}(conn)
-	}
-}
-
-// pushNewPeersToDevice — incremental UAPI update: добавляет в running device
-// каждого peer'а из state.json (idempotent — повторное добавление того же
-// pubkey'а просто обновляет allowed-ip/endpoint, не создаёт дубликат).
-func pushNewPeersToDevice(store *state.Store, dev *wg.Device, selfPub wgkey.Public) {
-	s, err := store.Read()
-	if err != nil {
-		log.Printf("push-peers: reload state: %v", err)
-		return
-	}
-	for _, p := range s.Peers {
-		if p.PublicKey == selfPub.String() {
-			continue
-		}
-		if err := dev.UpdatePeer(p); err != nil {
-			log.Printf("push-peers: update %s: %v", p.Label, err)
-		}
-	}
-}
-
-// selfEndpoint — public-endpoint этой ноды из её собственной peer-записи
-// в state (туда его кладёт seed при регистрации, а для seed'а — meshd init).
-// Пусто = нода за NAT / endpoint не объявлен, к ней нельзя инициировать.
-func selfEndpoint(s *state.State) string {
-	for _, p := range s.Peers {
-		if p.PublicKey == s.PublicKey {
-			return p.Endpoint
-		}
-	}
-	return ""
-}
-
-// cidrPrefixSuffix вытаскивает "/24" из "100.64.0.0/24".
-func cidrPrefixSuffix(cidr string) string {
-	if idx := strings.IndexByte(cidr, '/'); idx >= 0 {
-		return cidr[idx:]
-	}
-	return "/24"
 }

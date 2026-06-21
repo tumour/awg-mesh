@@ -58,3 +58,15 @@ func BuildStatus(s *state.State) StatusView {
 		Peers:       peers,
 	}
 }
+
+// SelfEndpoint — public-endpoint нашей ноды из её собственной peer-записи в
+// state (его кладёт seed при регистрации, а для seed'а — meshd init). Пусто =
+// нода за NAT / endpoint не объявлен (к ней нельзя инициировать туннель).
+func SelfEndpoint(s *state.State) string {
+	for _, p := range s.Peers {
+		if p.PublicKey == s.PublicKey {
+			return p.Endpoint
+		}
+	}
+	return ""
+}

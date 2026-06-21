@@ -7,8 +7,8 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"time"
 
+	"github.com/tumour/awg-mesh/internal/bootstrap"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
 	"github.com/tumour/awg-mesh/internal/handshake"
 	"github.com/tumour/awg-mesh/internal/jointoken"
@@ -111,51 +111,15 @@ func cmdJoin(args []string) error {
 		return fmt.Errorf("seed pubkey wrong size: %d", len(seedPub))
 	}
 
-	hs, err := handshake.InitiatorHandshake(priv[:], pub[:], seedPub, psk)
-	if err != nil {
-		return fmt.Errorf("init handshake: %w", err)
-	}
-
 	fmt.Printf("connecting to seed %s...\n", tok.SeedEndpoint)
-	conn, err := net.DialTimeout("tcp", tok.SeedEndpoint, 10*time.Second)
-	if err != nil {
-		return fmt.Errorf("dial seed: %w", err)
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-
-	// Message 1: client → server
-	msg1, _, _, err := hs.WriteMessage(nil, nil)
-	if err != nil {
-		return fmt.Errorf("noise msg1: %w", err)
-	}
-	if err := writeFramed(conn, msg1); err != nil {
-		return fmt.Errorf("send msg1: %w", err)
-	}
-
-	// Message 2: server → client (+ CipherStates)
-	msg2, err := readFramed(conn, 2048)
-	if err != nil {
-		return fmt.Errorf("read msg2: %w", err)
-	}
-	_, csInitToResp, csRespToInit, err := hs.ReadMessage(nil, msg2)
-	if err != nil {
-		return fmt.Errorf("noise msg2 (wrong secret or seed pubkey?): %w", err)
-	}
-
-	// HelloRequest
-	if err := proto.WriteMessage(conn, csInitToResp, proto.HelloRequest{
+	resp, err := bootstrap.Join(tok.SeedEndpoint, psk, priv, pub, seedPub, proto.HelloRequest{
 		Version:   proto.ProtoVersion,
 		Label:     *label,
 		PublicKey: pub.String(),
 		Endpoint:  *publicEndpoint,
-	}); err != nil {
-		return fmt.Errorf("send hello-req: %w", err)
-	}
-
-	var resp proto.HelloResponse
-	if err := proto.ReadMessage(conn, csRespToInit, &resp); err != nil {
-		return fmt.Errorf("read hello-resp: %w", err)
+	})
+	if err != nil {
+		return err
 	}
 	if resp.Status != "ok" {
 		return fmt.Errorf("seed rejected: %s", resp.Error)

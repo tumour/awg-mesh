@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/tumour/awg-mesh/internal/jointoken"
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -20,6 +21,7 @@ func cmdToken(args []string) error {
 	fs := flag.NewFlagSet("token", flag.ExitOnError)
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	quiet := fs.Bool("quiet", false, "print only the bare token (for scripts)")
+	fs.BoolVar(quiet, "q", false, "alias for --quiet")
 	fs.Parse(args)
 
 	s, err := state.Load(*stateFlag)
@@ -59,7 +61,7 @@ seed: %s
 // join-token. На самом seed'е это наши данные; иначе ищем seed в peer-list.
 func seedBootstrapInfo(s *state.State) (pubKey, endpoint string, err error) {
 	if s.IsSeed {
-		ep := selfEndpoint(s)
+		ep := mesh.SelfEndpoint(s)
 		if ep == "" {
 			return "", "", fmt.Errorf("seed has no public endpoint in state — cannot build a usable token")
 		}

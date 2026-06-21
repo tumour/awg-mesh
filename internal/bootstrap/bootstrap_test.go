@@ -1,4 +1,4 @@
-package main
+package bootstrap
 
 import (
 	"bytes"
@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 )
-
-// Тесты аллокации IP переехали в internal/mesh (alloc_test.go) вместе с логикой.
 
 func TestFramedRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()
