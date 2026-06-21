@@ -19,8 +19,8 @@ import (
 	"github.com/tumour/awg-mesh/internal/awgparams"
 )
 
-// DefaultPath — стандартное место хранения state.json (chmod 600).
-const DefaultPath = "/etc/meshd/state.json"
+// DefaultPath — стандартное место хранения state.json (chmod 600). Зависит от
+// ОС, поэтому определён в path_unix.go / path_windows.go (build-tags).
 
 // State — корневая структура persistent state.
 type State struct {

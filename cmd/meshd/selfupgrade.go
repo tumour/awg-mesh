@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/gossip"
@@ -409,12 +408,13 @@ func binaryVersion(path string) (string, error) {
 	return v, nil
 }
 
-// spawnDetached запускает процесс, отвязанный от нашей сессии (Setsid): разрыв
-// awg0/SSH не пошлёт ему SIGHUP. stdout+stderr → logPath, stdin → /dev/null.
-// Не ждём завершения — процесс переживает родителя.
+// spawnDetached запускает процесс, отвязанный от нашей сессии: разрыв awg0/SSH
+// не пошлёт ему SIGHUP. stdout+stderr → logPath, stdin → /dev/null. Не ждём
+// завершения — процесс переживает родителя. Способ отвязки платформенный
+// (detachSysProcAttr: setsid на unix, DETACHED_PROCESS на windows).
 func spawnDetached(name string, args []string, logPath string) error {
 	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachSysProcAttr()
 
 	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {

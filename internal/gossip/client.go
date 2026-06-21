@@ -55,13 +55,13 @@ func (c *Client) Run(ctx context.Context) {
 			log.Printf("gossip: client stopped")
 			return
 		case <-ticker.C:
-			c.doRound()
+			c.doRound(ctx)
 		}
 	}
 }
 
 // doRound — один цикл: выбрать peer'а, опросить, merge.
-func (c *Client) doRound() {
+func (c *Client) doRound(ctx context.Context) {
 	st, err := c.store.Read()
 	if err != nil {
 		log.Printf("gossip: load state: %v", err)
@@ -74,7 +74,7 @@ func (c *Client) doRound() {
 		return
 	}
 
-	resp, err := c.fetchPeers(target.NodeIP)
+	resp, err := c.fetchPeers(ctx, target.NodeIP)
 	if err != nil {
 		log.Printf("gossip: fetch from %s (%s): %v", target.Label, target.NodeIP, err)
 		return
@@ -119,10 +119,11 @@ func (c *Client) doRound() {
 	}
 }
 
-// fetchPeers — HTTP GET /v1/peers через wg-туннель.
-func (c *Client) fetchPeers(meshIP string) (*PeersResponse, error) {
+// fetchPeers — HTTP GET /v1/peers через wg-туннель. ctx прокидывается, чтобы
+// летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута.
+func (c *Client) fetchPeers(ctx context.Context, meshIP string) (*PeersResponse, error) {
 	url := fmt.Sprintf("http://%s:%d/v1/peers", meshIP, c.port)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
