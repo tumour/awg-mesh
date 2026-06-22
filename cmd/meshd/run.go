@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
 	"os/signal"
 	"syscall"
 	"time"
@@ -24,6 +24,9 @@ func cmdRun(args []string) error {
 		"how often to pull peer-list from a random peer (0 = disabled)")
 	fs.Parse(args)
 
+	logger := newDaemonLogger()
+	slog.SetDefault(logger)
+
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -33,17 +36,18 @@ func cmdRun(args []string) error {
 		Interface:      *iface,
 		Verbose:        *verbose,
 		GossipInterval: *gossipInterval,
-		FirewallWarn:   warnFirewallUFW,
+		Logger:         logger,
+		FirewallWarn:   func(iface string) { warnFirewallUFW(logger, iface) },
 	})
 }
 
 // warnFirewallUFW — host-integration: если UFW активен и блокирует gossip на
 // mesh-интерфейсе, предупреждаем в лог (firewall meshd сам не трогает; см. ufw.go).
-func warnFirewallUFW(iface string) {
+func warnFirewallUFW(logger *slog.Logger, iface string) {
 	active, rules := ufwStatus()
 	if active && !ufwMeshRuleExists(rules) {
-		log.Printf("warn: ufw is active and blocks incoming gossip on %s — peers "+
-			"can't pull peer-list; fix: ufw allow in on %s to any port %d proto tcp",
-			iface, iface, gossip.DefaultPort)
+		logger.Warn("ufw is active and blocks incoming gossip on mesh interface — "+
+			"peers can't pull peer-list; fix: ufw allow in on this iface to gossip port",
+			"iface", iface, "gossip_port", gossip.DefaultPort)
 	}
 }

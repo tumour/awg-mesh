@@ -16,7 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -33,6 +33,7 @@ type Server struct {
 	store *state.Store
 	addr  string
 	srv   *http.Server
+	log   *slog.Logger
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO
@@ -43,9 +44,13 @@ type PeersResponse struct {
 }
 
 // NewServer создаёт сервер на mesh-IP:port. host обычно = state.NodeIP.
-func NewServer(host string, port int, store *state.Store) *Server {
+// logger (nil → slog.Default()) инъектируется для embeddability.
+func NewServer(host string, port int, store *state.Store, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	return &Server{store: store, addr: addr}
+	return &Server{store: store, addr: addr, log: logger.With("component", "gossip")}
 }
 
 // Start запускает сервер. Останавливается при отмене ctx.
@@ -66,7 +71,7 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.srv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("gossip: listening on http://%s/v1/peers", s.addr)
+	s.log.Info("server listening", "url", fmt.Sprintf("http://%s/v1/peers", s.addr))
 	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("gossip server: %w", err)
 	}
@@ -81,7 +86,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	}
 	st, err := s.store.Read()
 	if err != nil {
-		log.Printf("gossip: load state: %v", err)
+		s.log.Error("load state failed", "err", err)
 		http.Error(w, "state unavailable", http.StatusInternalServerError)
 		return
 	}

@@ -10,7 +10,7 @@ package node
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -45,6 +45,9 @@ type Options struct {
 	Interface      string
 	Verbose        bool
 	GossipInterval time.Duration
+	// Logger (опц., nil → slog.Default()) — инъектируемый структурный логгер.
+	// Демон не пишет в глобальный log: embeddable из вебморды/LuCI со своим sink'ом.
+	Logger *slog.Logger
 	// FirewallWarn (опц.) вызывается после поднятия интерфейса с его именем — cmd
 	// передаёт сюда host-integration проверку (UFW), вне домена и оркестрации.
 	FirewallWarn func(ifaceName string)
@@ -54,6 +57,11 @@ type Options struct {
 // Идемпотентен: device пересоздаётся каждый запуск, peers применяются заново,
 // state на диске — source of truth.
 func Run(ctx context.Context, opts Options) error {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	store := state.NewStore(opts.StateFile)
 	s, err := store.Read()
 	if err != nil {
@@ -78,7 +86,7 @@ func Run(ctx context.Context, opts Options) error {
 		listenPort = s.ListenPort
 	}
 
-	cleanupStaleInterface(opts.Interface)
+	cleanupStaleInterface(opts.Interface, logger)
 
 	device, err := wg.New(opts.Interface, listenPort, logLevel)
 	if err != nil {
@@ -86,8 +94,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer device.Close()
 
-	log.Printf("meshd run: created interface %s (mesh-ip=%s, peers=%d, seed=%v)",
-		device.Name(), s.NodeIP, len(s.Peers), s.IsSeed)
+	logger.Info("interface created", "iface", device.Name(),
+		"mesh_ip", s.NodeIP, "peers", len(s.Peers), "seed", s.IsSeed)
 
 	if err := device.Configure(priv, s.AwgParams, s.Peers, pub); err != nil {
 		return fmt.Errorf("configure device: %w", err)
@@ -98,7 +106,7 @@ func Run(ctx context.Context, opts Options) error {
 	if err := device.AssignIP(s.NodeIP + cidrSuffix(s.NetworkCIDR)); err != nil {
 		return fmt.Errorf("assign ip: %w", err)
 	}
-	log.Printf("meshd run: %s up, mesh-ip=%s", device.Name(), s.NodeIP)
+	logger.Info("interface up", "iface", device.Name(), "mesh_ip", s.NodeIP)
 
 	if opts.FirewallWarn != nil {
 		opts.FirewallWarn(device.Name())
@@ -114,18 +122,18 @@ func Run(ctx context.Context, opts Options) error {
 		addr := fmt.Sprintf(":%d", s.ListenPort)
 		go func() {
 			if err := bootstrap.Serve(ctx, addr, store, priv, pub, psk, func() {
-				pushPeers(store, device, pub)
-			}); err != nil {
-				log.Printf("bootstrap: %v", err)
+				pushPeers(store, device, pub, logger)
+			}, logger); err != nil {
+				logger.Error("bootstrap listener stopped", "err", err)
 			}
 		}()
 	}
 
 	// Gossip-server (отдаёт peer-list, слушает только mesh-IP) + client (pull).
-	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, store)
+	gossipSrv := gossip.NewServer(s.NodeIP, gossip.DefaultPort, store, logger)
 	go func() {
 		if err := gossipSrv.Start(ctx); err != nil {
-			log.Printf("gossip server: %v", err)
+			logger.Error("gossip server stopped", "err", err)
 		}
 	}()
 
@@ -134,27 +142,27 @@ func Run(ctx context.Context, opts Options) error {
 			gossip.DefaultPort, func(newPeers []state.Peer) {
 				for _, p := range newPeers {
 					if err := device.UpdatePeer(p); err != nil {
-						log.Printf("gossip: push %s to device: %v", p.Label, err)
+						logger.Warn("push gossip peer to device failed", "peer", p.Label, "err", err)
 					}
 				}
-			})
+			}, logger)
 		go gc.Run(ctx)
 	}
 
-	log.Printf("meshd run: ready, waiting for signals")
+	logger.Info("ready, waiting for signals")
 	<-ctx.Done()
-	log.Printf("meshd run: received signal, shutting down")
+	logger.Info("received signal, shutting down")
 
-	downInterface(device.Name())
+	downInterface(device.Name(), logger)
 	return nil
 }
 
 // pushPeers — добавить/обновить всех peers из state в running device (idempotent).
 // Вызывается после bootstrap-join'а. Принимает Device-интерфейс (тестируемо).
-func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public) {
+func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public, logger *slog.Logger) {
 	s, err := store.Read()
 	if err != nil {
-		log.Printf("push-peers: reload state: %v", err)
+		logger.Error("push-peers: reload state failed", "err", err)
 		return
 	}
 	for _, p := range s.Peers {
@@ -162,7 +170,7 @@ func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public) {
 			continue
 		}
 		if err := dev.UpdatePeer(p); err != nil {
-			log.Printf("push-peers: update %s: %v", p.Label, err)
+			logger.Warn("push-peers: update peer failed", "peer", p.Label, "err", err)
 		}
 	}
 }
@@ -191,17 +199,17 @@ func cidrSuffix(cidr string) string {
 
 // cleanupStaleInterface удаляет залежавшийся TUN от crash'нувшего прошлого
 // запуска, иначе tun.CreateTUN зафейлит. «Cannot find device» — норма (его нет).
-func cleanupStaleInterface(iface string) {
+func cleanupStaleInterface(iface string, logger *slog.Logger) {
 	if out, err := exec.Command("ip", "link", "delete", "dev", iface).CombinedOutput(); err != nil {
 		if !strings.Contains(string(out), "Cannot find device") {
-			log.Printf("warn: cleanup stale interface %s: %v: %s",
-				iface, err, strings.TrimSpace(string(out)))
+			logger.Warn("cleanup stale interface failed",
+				"iface", iface, "err", err, "output", strings.TrimSpace(string(out)))
 		}
 	}
 }
 
-func downInterface(iface string) {
+func downInterface(iface string, logger *slog.Logger) {
 	if out, err := exec.Command("ip", "link", "set", "down", "dev", iface).CombinedOutput(); err != nil {
-		log.Printf("warn: ip link down: %v: %s", err, strings.TrimSpace(string(out)))
+		logger.Warn("interface down failed", "err", err, "output", strings.TrimSpace(string(out)))
 	}
 }

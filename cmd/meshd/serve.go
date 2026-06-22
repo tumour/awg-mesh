@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/signal"
 	"syscall"
 
@@ -56,6 +56,10 @@ func cmdServe(args []string) error {
 		syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	log.Printf("meshd serve: seed=%s peers=%d", s.NodeLabel, len(s.Peers))
-	return bootstrap.Serve(ctx, addr, store, priv, pub, psk, nil)
+	logger := newDaemonLogger()
+	slog.SetDefault(logger)
+
+	logger.Info("serve: bootstrap listener (debug, no wg-device)",
+		"seed", s.NodeLabel, "peers", len(s.Peers))
+	return bootstrap.Serve(ctx, addr, store, priv, pub, psk, nil, logger)
 }

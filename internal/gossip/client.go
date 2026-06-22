@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -24,16 +24,22 @@ type Client struct {
 	http     *http.Client
 	// onNewPeers вызывается с новыми peer'ами для пуша в wg-device.
 	onNewPeers func(peers []state.Peer)
+	log        *slog.Logger
 }
 
 // NewClient создаёт gossip-клиента. onNewPeers — callback для wg-device-update.
+// logger (nil → slog.Default()) инъектируется для embeddability.
 func NewClient(
 	store *state.Store,
 	selfPub string,
 	interval time.Duration,
 	port int,
 	onNewPeers func([]state.Peer),
+	logger *slog.Logger,
 ) *Client {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Client{
 		store:      store,
 		selfPub:    selfPub,
@@ -41,6 +47,7 @@ func NewClient(
 		port:       port,
 		http:       &http.Client{Timeout: 10 * time.Second},
 		onNewPeers: onNewPeers,
+		log:        logger.With("component", "gossip"),
 	}
 }
 
@@ -48,12 +55,12 @@ func NewClient(
 func (c *Client) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
-	log.Printf("gossip: client started (interval=%s)", c.interval)
+	c.log.Info("client started", "interval", c.interval)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("gossip: client stopped")
+			c.log.Info("client stopped")
 			return
 		case <-ticker.C:
 			c.doRound(ctx)
@@ -65,7 +72,7 @@ func (c *Client) Run(ctx context.Context) {
 func (c *Client) doRound(ctx context.Context) {
 	st, err := c.store.Read()
 	if err != nil {
-		log.Printf("gossip: load state: %v", err)
+		c.log.Warn("load state failed", "err", err)
 		return
 	}
 
@@ -77,7 +84,7 @@ func (c *Client) doRound(ctx context.Context) {
 
 	resp, err := c.fetchPeers(ctx, target.NodeIP)
 	if err != nil {
-		log.Printf("gossip: fetch from %s (%s): %v", target.Label, target.NodeIP, err)
+		c.log.Warn("fetch peers failed", "peer", target.Label, "mesh_ip", target.NodeIP, "err", err)
 		return
 	}
 
@@ -97,13 +104,13 @@ func (c *Client) doRound(ctx context.Context) {
 		changed = ch
 		return nil
 	}); err != nil {
-		log.Printf("gossip: save state: %v", err)
+		c.log.Warn("merge/save state failed", "err", err)
 		return
 	}
 	if len(changed) == 0 {
 		return
 	}
-	log.Printf("gossip: %d peers added/updated (from %s)", len(changed), target.Label)
+	c.log.Info("peers added/updated", "count", len(changed), "from", target.Label)
 
 	if c.onNewPeers != nil {
 		c.onNewPeers(changed)

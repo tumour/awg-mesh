@@ -8,7 +8,7 @@ package bootstrap
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -31,7 +31,8 @@ const (
 
 // Serve запускает bootstrap accept-loop на addr. onRegistered (если не nil)
 // вызывается после каждого join'а — демон через него пушит свежий peer-list в
-// live wg-device. Останавливается при отмене ctx. Блокирующая.
+// live wg-device. logger (nil → slog.Default()) инъектируется для embeddability.
+// Останавливается при отмене ctx. Блокирующая.
 func Serve(
 	ctx context.Context,
 	addr string,
@@ -40,7 +41,13 @@ func Serve(
 	pub wgkey.Public,
 	psk []byte,
 	onRegistered func(),
+	logger *slog.Logger,
 ) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger = logger.With("component", "bootstrap")
+
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -48,14 +55,14 @@ func Serve(
 	defer listener.Close()
 	go func() { <-ctx.Done(); _ = listener.Close() }()
 
-	log.Printf("bootstrap: listening on %s/tcp", addr)
+	logger.Info("listening", "addr", addr, "proto", "tcp")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("bootstrap: accept: %v", err)
+			logger.Warn("accept failed", "err", err)
 			continue
 		}
 		go func(c net.Conn) {
@@ -63,11 +70,11 @@ func Serve(
 			// класть весь демон — гасим её в пределах одного соединения.
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("bootstrap: panic handling %s: %v", c.RemoteAddr(), r)
+					logger.Error("panic handling connection", "remote", c.RemoteAddr().String(), "panic", r)
 				}
 			}()
 			// onRegistered (push в device) — только после УСПЕШНОЙ регистрации.
-			if handleConn(c, store, priv, pub, psk) && onRegistered != nil {
+			if handleConn(c, store, priv, pub, psk, logger) && onRegistered != nil {
 				onRegistered()
 			}
 		}(conn)
@@ -136,27 +143,29 @@ func handleConn(
 	priv wgkey.Private,
 	pub wgkey.Public,
 	psk []byte,
+	logger *slog.Logger,
 ) bool {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(connDeadline))
 
-	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("[%s] new bootstrap-connection", remoteAddr)
+	// Per-conn логгер: remote-адрес как атрибут на всех строках этого соединения.
+	clog := logger.With("remote", conn.RemoteAddr().String())
+	clog.Info("new bootstrap connection")
 
 	hs, err := handshake.ResponderHandshake(priv[:], pub[:], psk)
 	if err != nil {
-		log.Printf("[%s] responder-handshake init: %v", remoteAddr, err)
+		clog.Warn("responder handshake init failed", "err", err)
 		return false
 	}
 
 	// Message 1 (client → server)
 	msg1, err := proto.ReadFrame(conn, handshakeMaxFrame)
 	if err != nil {
-		log.Printf("[%s] read msg1: %v", remoteAddr, err)
+		clog.Warn("read msg1 failed", "err", err)
 		return false
 	}
 	if _, _, _, err := hs.ReadMessage(nil, msg1); err != nil {
-		log.Printf("[%s] noise msg1 fail (wrong secret or wrong seed pubkey?): %v", remoteAddr, err)
+		clog.Warn("noise msg1 failed (wrong secret or seed pubkey?)", "err", err)
 		return false
 	}
 
@@ -165,23 +174,22 @@ func handleConn(
 	// сервер шифрует через c_resp_to_init, расшифровывает через c_init_to_resp.
 	out, csClientToServer, csServerToClient, err := hs.WriteMessage(nil, nil)
 	if err != nil {
-		log.Printf("[%s] write msg2: %v", remoteAddr, err)
+		clog.Warn("write msg2 failed", "err", err)
 		return false
 	}
 	if err := proto.WriteFrame(conn, out); err != nil {
-		log.Printf("[%s] send msg2: %v", remoteAddr, err)
+		clog.Warn("send msg2 failed", "err", err)
 		return false
 	}
 
 	// Шифрованный канал готов. Читаем HelloRequest.
 	var req proto.HelloRequest
 	if err := proto.ReadMessage(conn, csClientToServer, &req); err != nil {
-		log.Printf("[%s] read hello-req: %v", remoteAddr, err)
+		clog.Warn("read hello-req failed", "err", err)
 		return false
 	}
 	if req.Version != proto.ProtoVersion {
-		log.Printf("[%s] proto-version mismatch: client=%d server=%d",
-			remoteAddr, req.Version, proto.ProtoVersion)
+		clog.Warn("proto version mismatch", "client", req.Version, "server", proto.ProtoVersion)
 		respondErr(conn, csServerToClient, fmt.Sprintf(
 			"proto version mismatch (server=%d, client=%d)",
 			proto.ProtoVersion, req.Version))
@@ -192,8 +200,7 @@ func handleConn(
 	// валидным host:port: он уйдёт всем нодам в UAPI wg-device.
 	if req.Endpoint != "" {
 		if _, _, err := net.SplitHostPort(req.Endpoint); err != nil {
-			log.Printf("[%s] invalid endpoint %q from %s: %v",
-				remoteAddr, req.Endpoint, req.Label, err)
+			clog.Warn("invalid endpoint", "endpoint", req.Endpoint, "label", req.Label, "err", err)
 			respondErr(conn, csServerToClient,
 				fmt.Sprintf("invalid endpoint %q (want host:port)", req.Endpoint))
 			return false
@@ -222,20 +229,19 @@ func handleConn(
 	if err != nil {
 		// Полную причину — только в наш лог; клиенту generic (не сливаем
 		// внутренние строки ошибок в открытый канал).
-		log.Printf("[%s] register peer %s: %v", remoteAddr, req.Label, err)
+		clog.Warn("register peer failed", "label", req.Label, "err", err)
 		respondErr(conn, csServerToClient, "registration failed")
 		return false
 	}
 
 	if reg.Rejoined {
-		log.Printf("[%s] peer %s already registered (ip=%s), returning existing",
-			remoteAddr, req.Label, reg.AssignedIP)
+		clog.Info("peer re-joined (returning existing)", "label", req.Label, "ip", reg.AssignedIP)
 	} else {
-		log.Printf("[%s] registered peer %s as %s (endpoint=%q, pubkey=%s)",
-			remoteAddr, req.Label, reg.AssignedIP, req.Endpoint, shortKey(req.PublicKey))
+		clog.Info("peer registered", "label", req.Label, "ip", reg.AssignedIP,
+			"endpoint", req.Endpoint, "pubkey", shortKey(req.PublicKey))
 	}
 
-	respondOK(conn, csServerToClient, snap, reg.AssignedIP)
+	respondOK(conn, csServerToClient, snap, reg.AssignedIP, clog)
 	return true
 }
 
@@ -247,7 +253,7 @@ func respondErr(conn net.Conn, cs *noise.CipherState, msg string) {
 	})
 }
 
-func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP string) {
+func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP string, logger *slog.Logger) {
 	resp := proto.HelloResponse{
 		Version:     proto.ProtoVersion,
 		Status:      "ok",
@@ -258,7 +264,7 @@ func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP stri
 		Peers:       proto.PeerInfosFromState(s.Peers),
 	}
 	if err := proto.WriteMessage(conn, cs, resp); err != nil {
-		log.Printf("write hello-resp: %v", err)
+		logger.Warn("write hello-resp failed", "err", err)
 	}
 }
 
