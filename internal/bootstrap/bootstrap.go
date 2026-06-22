@@ -7,6 +7,7 @@ package bootstrap
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
@@ -27,6 +28,11 @@ const (
 	connDeadline = 30 * time.Second
 	// dialTimeout — таймаут на коннект клиента к seed.
 	dialTimeout = 10 * time.Second
+	// maxConcurrentHandshakes — потолок одновременных Noise-handshake'ей. Порт
+	// торчит наружу, а IKpsk2 считает msg1/msg2 (Curve25519 DH) ДО любой проверки
+	// PSK — без лимита поток коннектов истощил бы CPU/горутины/FD. Лишние коннекты
+	// ждут слот (backpressure через kernel-backlog), а не плодят горутины.
+	maxConcurrentHandshakes = 64
 )
 
 // Serve запускает bootstrap accept-loop на addr. onRegistered (если не nil)
@@ -55,6 +61,9 @@ func Serve(
 	defer listener.Close()
 	go func() { <-ctx.Done(); _ = listener.Close() }()
 
+	// Семафор ограничивает число handshake'ей в полёте (см. maxConcurrentHandshakes).
+	sem := make(chan struct{}, maxConcurrentHandshakes)
+
 	logger.Info("listening", "addr", addr, "proto", "tcp")
 	for {
 		conn, err := listener.Accept()
@@ -65,7 +74,16 @@ func Serve(
 			logger.Warn("accept failed", "err", err)
 			continue
 		}
+		// Берём слот ДО спавна горутины — при переполнении accept-loop притормозит
+		// (backpressure), а не наплодит горутин. Отмена ctx разблокирует ожидание.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			_ = conn.Close()
+			return nil
+		}
 		go func(c net.Conn) {
+			defer func() { <-sem }()
 			// recover: паника на кривом фрейме/вводе с публичного порта не должна
 			// класть весь демон — гасим её в пределах одного соединения.
 			defer func() {
@@ -193,6 +211,18 @@ func handleConn(
 		respondErr(conn, csServerToClient, fmt.Sprintf(
 			"proto version mismatch (server=%d, client=%d)",
 			proto.ProtoVersion, req.Version))
+		return false
+	}
+
+	// Identity binding: pubkey, заявленный в HelloRequest, обязан совпадать со
+	// static-ключом, который Noise УЖЕ аутентифицировал в msg1 (hs.PeerStatic()).
+	// Иначе клиент, знающий cluster-secret, прошёл бы хендшейк ключом A, а
+	// зарегистрировал бы произвольный чужой pubkey B — фантомная запись в mesh.
+	authedPub := base64.StdEncoding.EncodeToString(hs.PeerStatic())
+	if req.PublicKey != authedPub {
+		clog.Warn("identity mismatch: claimed pubkey != Noise static key",
+			"claimed", shortKey(req.PublicKey), "authenticated", shortKey(authedPub))
+		respondErr(conn, csServerToClient, "identity mismatch")
 		return false
 	}
 

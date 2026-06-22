@@ -95,8 +95,10 @@ func (c *Client) doRound(ctx context.Context) {
 	remote := proto.PeerInfosToState(resp.Peers)
 
 	var changed []state.Peer
+	var rejected []string
 	if _, err := c.store.Update(func(s *state.State) error {
-		merged, ch := mesh.MergePeers(s.Peers, remote, c.selfPub)
+		merged, ch, rej := mesh.MergePeers(s.Peers, remote, c.selfPub, s.NetworkCIDR)
+		rejected = rej
 		if len(ch) == 0 {
 			return state.ErrNoChange // ничего нового — не перезаписываем файл
 		}
@@ -106,6 +108,10 @@ func (c *Client) doRound(ctx context.Context) {
 	}); err != nil {
 		c.log.Warn("merge/save state failed", "err", err)
 		return
+	}
+	// Отказы — потенциальные попытки угона mesh-IP/маршрута соседом; видно оператору.
+	for _, r := range rejected {
+		c.log.Warn("gossip peer rejected", "reason", r, "from", target.Label)
 	}
 	if len(changed) == 0 {
 		return

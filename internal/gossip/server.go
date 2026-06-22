@@ -109,5 +109,9 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Статус 200 уже ушёл (заголовок записан) — починить тело нельзя, но факт
+		// битого ответа фиксируем у себя.
+		s.log.Warn("encode peers response failed", "err", err)
+	}
 }
