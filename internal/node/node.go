@@ -3,15 +3,14 @@
 // обрабатывает graceful shutdown по ctx. Доменные решения берёт из internal/mesh,
 // транспорт — из internal/bootstrap и internal/gossip.
 //
-// ОС-зависимые вызовы (cleanup/down TUN-интерфейса) пока через `ip` (Linux) —
-// помечены TODO и будут вынесены за build-tags при добавлении кроссплатформы.
+// ОС-зависимая настройка линка (адрес, up/down/delete) — за интерфейсом wg.Linker
+// (build-tags); сам Run платформо-независим и тестируем через Options.NewDevice/Linker.
 package node
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -28,13 +27,14 @@ import (
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
-// Device — то, что нужно оркестратору от wg-устройства. Узкий интерфейс (его
-// удовлетворяет *wg.Device) открывает тестирование run-flow без реального TUN/root.
+// Device — то, что нужно оркестратору от userspace wg-устройства (kernel-side
+// настройку линка делает Linker). Узкий интерфейс — его удовлетворяет *wg.Device;
+// вместе с Options.NewDevice/Linker позволяет прогнать run-flow с фейками, без
+// реального TUN/root.
 type Device interface {
 	Configure(priv wgkey.Private, awgp awgparams.Params, peers []state.Peer, selfPubKey wgkey.Public) error
 	UpdatePeer(p state.Peer) error
 	Up() error
-	AssignIP(cidr string) error
 	Name() string
 	Close()
 }
@@ -48,6 +48,10 @@ type Options struct {
 	// Logger (опц., nil → slog.Default()) — инъектируемый структурный логгер.
 	// Демон не пишет в глобальный log: embeddable из вебморды/LuCI со своим sink'ом.
 	Logger *slog.Logger
+	// NewDevice/Linker (опц., nil → wg.New / wg.DefaultLinker) — фабрика userspace-
+	// устройства и порт настройки линка. Инъектируемы → run-flow тестируем с фейками.
+	NewDevice func(name string, listenPort, logLevel int) (Device, error)
+	Linker    wg.Linker
 	// FirewallWarn (опц.) вызывается после поднятия интерфейса с его именем — cmd
 	// передаёт сюда host-integration проверку (UFW), вне домена и оркестрации.
 	FirewallWarn func(ifaceName string)
@@ -60,6 +64,16 @@ func Run(ctx context.Context, opts Options) error {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	newDevice := opts.NewDevice
+	if newDevice == nil {
+		newDevice = func(name string, listenPort, logLevel int) (Device, error) {
+			return wg.New(name, listenPort, logLevel)
+		}
+	}
+	linker := opts.Linker
+	if linker == nil {
+		linker = wg.DefaultLinker()
 	}
 
 	store := state.NewStore(opts.StateFile)
@@ -86,9 +100,12 @@ func Run(ctx context.Context, opts Options) error {
 		listenPort = s.ListenPort
 	}
 
-	cleanupStaleInterface(opts.Interface, logger)
+	// Чистим залежавшийся TUN от прошлого crash'а (идемпотентно: нет линка — не ошибка).
+	if err := linker.Delete(opts.Interface); err != nil {
+		logger.Warn("cleanup stale interface failed", "iface", opts.Interface, "err", err)
+	}
 
-	device, err := wg.New(opts.Interface, listenPort, logLevel)
+	device, err := newDevice(opts.Interface, listenPort, logLevel)
 	if err != nil {
 		return fmt.Errorf("create wg device: %w", err)
 	}
@@ -103,8 +120,12 @@ func Run(ctx context.Context, opts Options) error {
 	if err := device.Up(); err != nil {
 		return fmt.Errorf("bring device up: %w", err)
 	}
-	if err := device.AssignIP(s.NodeIP + cidrSuffix(s.NetworkCIDR)); err != nil {
+	// Kernel-side: назначить mesh-IP и поднять линк (userspace-up уже сделан выше).
+	if err := linker.AddIP(device.Name(), s.NodeIP+cidrSuffix(s.NetworkCIDR)); err != nil {
 		return fmt.Errorf("assign ip: %w", err)
+	}
+	if err := linker.SetUp(device.Name()); err != nil {
+		return fmt.Errorf("link up: %w", err)
 	}
 	logger.Info("interface up", "iface", device.Name(), "mesh_ip", s.NodeIP)
 
@@ -153,7 +174,9 @@ func Run(ctx context.Context, opts Options) error {
 	<-ctx.Done()
 	logger.Info("received signal, shutting down")
 
-	downInterface(device.Name(), logger)
+	if err := linker.SetDown(device.Name()); err != nil {
+		logger.Warn("interface down failed", "iface", device.Name(), "err", err)
+	}
 	return nil
 }
 
@@ -193,23 +216,4 @@ func cidrSuffix(cidr string) string {
 		return cidr[idx:]
 	}
 	return "/24"
-}
-
-// --- ОС-зависимое (Linux, exec ip). TODO: вынести за build-tags (кроссплатформа). ---
-
-// cleanupStaleInterface удаляет залежавшийся TUN от crash'нувшего прошлого
-// запуска, иначе tun.CreateTUN зафейлит. «Cannot find device» — норма (его нет).
-func cleanupStaleInterface(iface string, logger *slog.Logger) {
-	if out, err := exec.Command("ip", "link", "delete", "dev", iface).CombinedOutput(); err != nil {
-		if !strings.Contains(string(out), "Cannot find device") {
-			logger.Warn("cleanup stale interface failed",
-				"iface", iface, "err", err, "output", strings.TrimSpace(string(out)))
-		}
-	}
-}
-
-func downInterface(iface string, logger *slog.Logger) {
-	if out, err := exec.Command("ip", "link", "set", "down", "dev", iface).CombinedOutput(); err != nil {
-		logger.Warn("interface down failed", "err", err, "output", strings.TrimSpace(string(out)))
-	}
 }

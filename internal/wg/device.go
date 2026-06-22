@@ -1,14 +1,14 @@
 // Package wg — обёртка над amneziawg-go/device: создание TUN-интерфейса,
 // конфигурирование через UAPI (AmneziaWG-params + peers), live add/remove
-// peer'ов без рестарта.
+// peer'ов без рестарта. Сам Device кросс-платформенный (amneziawg-go умеет
+// wintun); ОС-зависимая L3-настройка линка вынесена в Linker (linker_*.go).
 //
-// Требует CAP_NET_ADMIN или root — для tun.CreateTUN и `ip addr add`.
+// Требует CAP_NET_ADMIN или root — для tun.CreateTUN.
 package wg
 
 import (
 	"encoding/base64"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
@@ -108,27 +108,11 @@ func (d *Device) RemovePeer(pubkeyBase64 string) error {
 	return nil
 }
 
-// Up — поднимает device (handshake'и начинаются, UDP-сокет слушает).
+// Up — поднимает device (handshake'и начинаются, UDP-сокет слушает). Это
+// userspace-up; назначение адреса и подъём kernel-линка — через Linker.
 func (d *Device) Up() error {
 	if err := d.dev.Up(); err != nil {
 		return fmt.Errorf("device.Up: %w", err)
-	}
-	return nil
-}
-
-// AssignIP назначает IP-адрес на TUN-интерфейс и поднимает link.
-// Использует /sbin/ip из util-linux (есть в любом Linux-дистрибутиве).
-// Для production желателен netlink через github.com/vishvananda/netlink,
-// но для MVP exec.Command надёжнее всего.
-func (d *Device) AssignIP(cidr string) error {
-	if out, err := exec.Command("ip", "addr", "add", cidr, "dev", d.name).CombinedOutput(); err != nil {
-		// Если адрес уже назначен (RTNETLINK answers: File exists) — не падаем.
-		if !strings.Contains(string(out), "File exists") {
-			return fmt.Errorf("ip addr add %s dev %s: %v: %s", cidr, d.name, err, out)
-		}
-	}
-	if out, err := exec.Command("ip", "link", "set", "up", "dev", d.name).CombinedOutput(); err != nil {
-		return fmt.Errorf("ip link set up %s: %v: %s", d.name, err, out)
 	}
 	return nil
 }
