@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package selfupdate
 
 import "syscall"
 

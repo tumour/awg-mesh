@@ -28,6 +28,15 @@ import (
 // DefaultPort — порт gossip-API. Слушает только на mesh-IP.
 const DefaultPort = 9100
 
+// HTTP-таймауты gossip-сервера: даже внутри доверенного туннеля медленный/
+// зависший peer не должен держать соединение и goroutine бесконечно (slowloris).
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 10 * time.Second
+	writeTimeout      = 10 * time.Second
+	idleTimeout       = 60 * time.Second
+)
+
 // Server — HTTP API для отдачи peer-listа.
 type Server struct {
 	store *state.Store
@@ -61,7 +70,10 @@ func (s *Server) Start(ctx context.Context) error {
 	s.srv = &http.Server{
 		Addr:              s.addr,
 		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	go func() {

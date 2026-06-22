@@ -20,6 +20,11 @@ import (
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
+// persistentKeepaliveSec — интервал keepalive (сек) для peer'ов с endpoint'ом:
+// держит NAT-mapping/conntrack живым, чтобы к ноде можно было инициировать
+// handshake. Для NAT-only peer'ов (без endpoint) не ставится — они initiator'ы.
+const persistentKeepaliveSec = 25
+
 // Device — managed AmneziaWG interface (TUN + userspace device).
 type Device struct {
 	dev        *device.Device
@@ -150,7 +155,7 @@ func writePeer(sb *strings.Builder, p state.Peer) error {
 	fmt.Fprintf(sb, "allowed_ip=%s/32\n", p.NodeIP)
 	if p.Endpoint != "" {
 		fmt.Fprintf(sb, "endpoint=%s\n", p.Endpoint)
-		fmt.Fprintf(sb, "persistent_keepalive_interval=25\n")
+		fmt.Fprintf(sb, "persistent_keepalive_interval=%d\n", persistentKeepaliveSec)
 	}
 	return nil
 }
