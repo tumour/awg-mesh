@@ -104,16 +104,7 @@ func Join(p JoinParams) (JoinResult, error) {
 		return JoinResult{}, fmt.Errorf("seed rejected: %s", resp.Error)
 	}
 
-	peers := make([]state.Peer, 0, len(resp.Peers))
-	for _, pi := range resp.Peers {
-		peers = append(peers, state.Peer{
-			Label:     pi.Label,
-			PublicKey: pi.PublicKey,
-			Endpoint:  pi.Endpoint,
-			NodeIP:    pi.NodeIP,
-			IsSeed:    pi.IsSeed,
-		})
-	}
+	peers := proto.PeerInfosToState(resp.Peers)
 
 	// resume без --public-endpoint — сохраняем прежний listen-port (seed помнит
 	// объявленный ранее endpoint, порт должен совпадать).

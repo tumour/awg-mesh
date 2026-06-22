@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/mesh"
+	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -82,19 +83,9 @@ func (c *Client) doRound(ctx context.Context) {
 
 	// Merge — внутри Update, против свежего state: между fetch'ем и записью
 	// bootstrap-listener мог зарегистрировать нового peer'а, merge поверх
-	// устаревшего снапшота потерял бы его.
-	// Конвертируем wire-тип gossip.PeerInfo → доменный state.Peer: mesh-домен
-	// не знает про gossip/proto-форматы.
-	remote := make([]state.Peer, 0, len(resp.Peers))
-	for _, r := range resp.Peers {
-		remote = append(remote, state.Peer{
-			Label:     r.Label,
-			PublicKey: r.PublicKey,
-			Endpoint:  r.Endpoint,
-			NodeIP:    r.NodeIP,
-			IsSeed:    r.IsSeed,
-		})
-	}
+	// устаревшего снапшота потерял бы его. Конвертируем wire → домен: mesh.MergePeers
+	// работает на state.Peer и не знает про wire-форматы.
+	remote := proto.PeerInfosToState(resp.Peers)
 
 	var changed []state.Peer
 	if _, err := c.store.Update(func(s *state.State) error {
@@ -163,4 +154,4 @@ func pickRandomPeer(peers []state.Peer, selfPub string) *state.Peer {
 }
 
 // Доменный merge peer-list'а живёт в internal/mesh.MergePeers — вызывается
-// из doRound выше (после конверсии gossip.PeerInfo → state.Peer).
+// из doRound выше (после конверсии proto.PeerInfo → state.Peer).

@@ -1,12 +1,20 @@
-// Package proto — wire-сообщения bootstrap-протокола (после Noise-handshake'а).
+// Package proto — wire-формат control-plane: типы сообщений, length-prefixed
+// framing (WriteFrame/ReadFrame) и конверсии wire↔домен (PeerInfo ↔ state.Peer).
 //
-// Все сообщения шифруются через CipherState, полученный после Noise IKpsk2.
-// Формат: 2-байтовая длина (big-endian) + ciphertext.
+// Сообщения bootstrap'а (HelloRequest/HelloResponse) шифруются через CipherState
+// после Noise IKpsk2; кадр — 2-байтовая длина (big-endian) + ciphertext. PeerInfo
+// переиспользуется и gossip'ом (HTTP /v1/peers, открытый текст внутри туннеля).
+//
+// Зависимость на internal/state однонаправленна (wire-слой знает домен, не
+// наоборот) — направление зависимостей внутрь сохранено.
 //
 // ProtoVersion инкрементируется при breaking-changes wire-формата.
 package proto
 
-import "github.com/tumour/awg-mesh/internal/awgparams"
+import (
+	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/state"
+)
 
 // ProtoVersion — версия wire-протокола. При несовпадении handshake отклоняется.
 const ProtoVersion = 1
@@ -35,11 +43,56 @@ type HelloResponse struct {
 	Peers       []PeerInfo       `json:"peers,omitempty"`   // текущий peer-list seed'а
 }
 
-// PeerInfo — описание одного peer'а, передаётся в HelloResponse.
+// PeerInfo — wire-представление одного peer'а. ЕДИНЫЙ DTO для обоих control-plane
+// каналов: bootstrap (внутри Noise-шифрованного HelloResponse) и gossip
+// (HTTP-ответ /v1/peers). json-теги фиксируют формат gossip-API.
+//
+// LastSeen на wire НЕ передаётся — это локальная метка (refresh при merge),
+// конверсии ниже её опускают/занулят.
 type PeerInfo struct {
 	Label     string `json:"label"`
 	PublicKey string `json:"public_key"`
 	Endpoint  string `json:"endpoint,omitempty"` // host:port, пусто если клиент без public-endpoint
 	NodeIP    string `json:"node_ip"`
 	IsSeed    bool   `json:"is_seed"`
+}
+
+// PeerInfoFromState конвертирует доменный state.Peer в wire-DTO.
+func PeerInfoFromState(p state.Peer) PeerInfo {
+	return PeerInfo{
+		Label:     p.Label,
+		PublicKey: p.PublicKey,
+		Endpoint:  p.Endpoint,
+		NodeIP:    p.NodeIP,
+		IsSeed:    p.IsSeed,
+	}
+}
+
+// ToState — обратная конверсия wire-DTO → доменный state.Peer.
+func (pi PeerInfo) ToState() state.Peer {
+	return state.Peer{
+		Label:     pi.Label,
+		PublicKey: pi.PublicKey,
+		Endpoint:  pi.Endpoint,
+		NodeIP:    pi.NodeIP,
+		IsSeed:    pi.IsSeed,
+	}
+}
+
+// PeerInfosFromState — батч-конверсия peer-list'а в wire (HelloResponse / gossip).
+func PeerInfosFromState(ps []state.Peer) []PeerInfo {
+	out := make([]PeerInfo, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, PeerInfoFromState(p))
+	}
+	return out
+}
+
+// PeerInfosToState — батч-конверсия wire-списка в доменный (для merge/save).
+func PeerInfosToState(pis []PeerInfo) []state.Peer {
+	out := make([]state.Peer, 0, len(pis))
+	for _, pi := range pis {
+		out = append(out, pi.ToState())
+	}
+	return out
 }

@@ -8,7 +8,6 @@ package bootstrap
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"time"
@@ -104,12 +103,12 @@ func Join(
 	if err != nil {
 		return nil, fmt.Errorf("noise msg1: %w", err)
 	}
-	if err := writeFramed(conn, msg1); err != nil {
+	if err := proto.WriteFrame(conn, msg1); err != nil {
 		return nil, fmt.Errorf("send msg1: %w", err)
 	}
 
 	// Message 2: server → client (+ CipherStates)
-	msg2, err := readFramed(conn, handshakeMaxFrame)
+	msg2, err := proto.ReadFrame(conn, handshakeMaxFrame)
 	if err != nil {
 		return nil, fmt.Errorf("read msg2: %w", err)
 	}
@@ -151,7 +150,7 @@ func handleConn(
 	}
 
 	// Message 1 (client → server)
-	msg1, err := readFramed(conn, handshakeMaxFrame)
+	msg1, err := proto.ReadFrame(conn, handshakeMaxFrame)
 	if err != nil {
 		log.Printf("[%s] read msg1: %v", remoteAddr, err)
 		return false
@@ -169,7 +168,7 @@ func handleConn(
 		log.Printf("[%s] write msg2: %v", remoteAddr, err)
 		return false
 	}
-	if err := writeFramed(conn, out); err != nil {
+	if err := proto.WriteFrame(conn, out); err != nil {
 		log.Printf("[%s] send msg2: %v", remoteAddr, err)
 		return false
 	}
@@ -249,16 +248,6 @@ func respondErr(conn net.Conn, cs *noise.CipherState, msg string) {
 }
 
 func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP string) {
-	peers := make([]proto.PeerInfo, 0, len(s.Peers))
-	for _, p := range s.Peers {
-		peers = append(peers, proto.PeerInfo{
-			Label:     p.Label,
-			PublicKey: p.PublicKey,
-			Endpoint:  p.Endpoint,
-			NodeIP:    p.NodeIP,
-			IsSeed:    p.IsSeed,
-		})
-	}
 	resp := proto.HelloResponse{
 		Version:     proto.ProtoVersion,
 		Status:      "ok",
@@ -266,7 +255,7 @@ func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP stri
 		NetworkCIDR: s.NetworkCIDR,
 		AwgParams:   s.AwgParams,
 		WGPort:      s.ListenPort,
-		Peers:       peers,
+		Peers:       proto.PeerInfosFromState(s.Peers),
 	}
 	if err := proto.WriteMessage(conn, cs, resp); err != nil {
 		log.Printf("write hello-resp: %v", err)
@@ -278,37 +267,4 @@ func shortKey(k string) string {
 		return k[:8] + "..."
 	}
 	return k
-}
-
-// readFramed читает 2-байт length prefix + body. io.ReadFull (не conn.Read):
-// последний может вернуть partial read без err — на fragmented TCP это дало бы
-// length из мусора и обрыв handshake.
-func readFramed(conn net.Conn, maxSize int) ([]byte, error) {
-	var lenBuf [2]byte
-	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-		return nil, fmt.Errorf("read length: %w", err)
-	}
-	size := int(lenBuf[0])<<8 | int(lenBuf[1])
-	if size == 0 || size > maxSize {
-		return nil, fmt.Errorf("invalid frame size: %d (max %d)", size, maxSize)
-	}
-	buf := make([]byte, size)
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-	return buf, nil
-}
-
-func writeFramed(conn net.Conn, data []byte) error {
-	if len(data) > 0xFFFF {
-		return fmt.Errorf("frame too large: %d", len(data))
-	}
-	var lenBuf [2]byte
-	lenBuf[0] = byte(len(data) >> 8)
-	lenBuf[1] = byte(len(data))
-	if _, err := conn.Write(lenBuf[:]); err != nil {
-		return err
-	}
-	_, err := conn.Write(data)
-	return err
 }

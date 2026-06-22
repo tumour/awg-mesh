@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -34,19 +35,11 @@ type Server struct {
 	srv   *http.Server
 }
 
-// PeersResponse — JSON-форма ответа на /v1/peers.
+// PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO
+// proto.PeerInfo (тот же, что в bootstrap-HelloResponse).
 type PeersResponse struct {
-	Peers     []PeerInfo `json:"peers"`
-	UpdatedAt time.Time  `json:"updated_at"`
-}
-
-// PeerInfo — описание peer'а в gossip-ответе.
-type PeerInfo struct {
-	Label     string `json:"label"`
-	PublicKey string `json:"public_key"`
-	Endpoint  string `json:"endpoint,omitempty"`
-	NodeIP    string `json:"node_ip"`
-	IsSeed    bool   `json:"is_seed"`
+	Peers     []proto.PeerInfo `json:"peers"`
+	UpdatedAt time.Time        `json:"updated_at"`
 }
 
 // NewServer создаёт сервер на mesh-IP:port. host обычно = state.NodeIP.
@@ -93,17 +86,10 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	peers := make([]PeerInfo, 0, len(st.Peers))
-	for _, p := range st.Peers {
-		peers = append(peers, PeerInfo{
-			Label:     p.Label,
-			PublicKey: p.PublicKey,
-			Endpoint:  p.Endpoint,
-			NodeIP:    p.NodeIP,
-			IsSeed:    p.IsSeed,
-		})
+	resp := PeersResponse{
+		Peers:     proto.PeerInfosFromState(st.Peers),
+		UpdatedAt: st.UpdatedAt,
 	}
-	resp := PeersResponse{Peers: peers, UpdatedAt: st.UpdatedAt}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
