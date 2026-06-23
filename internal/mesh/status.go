@@ -70,3 +70,33 @@ func SelfEndpoint(s *state.State) string {
 	}
 	return ""
 }
+
+// reachablePeer — можем ли мы поднять прямой туннель к p: хотя бы одна сторона
+// объявила endpoint. Два узла за NAT (оба без endpoint) пути друг к другу не
+// имеют (NAT↔NAT не связывается — см. топологию hub-and-spoke в README).
+func reachablePeer(selfEndpoint string, p state.Peer) bool {
+	return p.Endpoint != "" || selfEndpoint != ""
+}
+
+// GossipCandidates — пиры, которых ИМЕЕТ СМЫСЛ gossip-опрашивать: не мы сами,
+// с валидным mesh-IP, и достижимые прямым туннелем (reachablePeer).
+//
+// Зачем фильтр достижимости: gossip к НЕдостижимому пиру (мы за NAT и он за NAT)
+// — это гарантированный HTTP-таймаут плюс каскад wg junk/handshake-retry в логах
+// («no known endpoint for peer»), и при этом НИКАКОГО обмена: peer-list между
+// двумя spoke всё равно течёт через hub-узел (с endpoint), который знает всех.
+// Так что заведомо-дохлый таргет = чистый шум, его и отсекаем.
+func GossipCandidates(s *state.State) []state.Peer {
+	selfEndpoint := SelfEndpoint(s)
+	out := make([]state.Peer, 0, len(s.Peers))
+	for _, p := range s.Peers {
+		if p.PublicKey == s.PublicKey || p.NodeIP == "" {
+			continue
+		}
+		if !reachablePeer(selfEndpoint, p) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}

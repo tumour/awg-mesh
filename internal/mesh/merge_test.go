@@ -192,6 +192,30 @@ func TestMergeRejectsInvalidNodeIP(t *testing.T) {
 	}
 }
 
+func TestMergeNewPeerInvalidEndpointNulled(t *testing.T) {
+	local := []state.Peer{{PublicKey: selfKey, NodeIP: "100.64.0.1"}}
+	// Новый peer с валидным IP, но кривым непустым endpoint → endpoint зануляется,
+	// сам peer добавляется initiator-only (в state/device мусор не попадает).
+	remote := []state.Peer{
+		{Label: "n", PublicKey: "N", NodeIP: "100.64.0.7", Endpoint: "garbage-no-port"},
+	}
+	merged, changed, rejected := MergePeers(local, remote, selfKey, testCIDR)
+	if len(changed) != 1 || changed[0].PublicKey != "N" {
+		t.Fatalf("peer with valid IP must still be added, got changed=%+v", changed)
+	}
+	if changed[0].Endpoint != "" {
+		t.Fatalf("invalid endpoint must be nulled, got %q", changed[0].Endpoint)
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("want 1 rejection note, got %v", rejected)
+	}
+	for _, p := range merged {
+		if p.PublicKey == "N" && p.Endpoint != "" {
+			t.Fatalf("merged peer keeps garbage endpoint: %+v", p)
+		}
+	}
+}
+
 func TestMergeRejectsInvalidEndpointFormat(t *testing.T) {
 	local := []state.Peer{
 		{Label: "b", PublicKey: "B", NodeIP: "100.64.0.3", Endpoint: "good.host:51820"},

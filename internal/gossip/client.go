@@ -76,9 +76,12 @@ func (c *Client) doRound(ctx context.Context) {
 		return
 	}
 
-	target := pickRandomPeer(st.Peers, c.selfPub)
+	// Кандидаты = достижимые пиры (доменное правило mesh.GossipCandidates):
+	// не долбимся к узлу, к которому by-design нет пути (оба за NAT) — иначе
+	// гарантированный таймаут + каскад wg junk-retry в логах, без обмена данными.
+	target := pickRandomPeer(mesh.GossipCandidates(st))
 	if target == nil {
-		// Нет peer'ов кроме себя — нечего гoссипить.
+		// Нет достижимых peer'ов кроме себя — нечего гoссипить.
 		return
 	}
 
@@ -146,19 +149,9 @@ func (c *Client) fetchPeers(ctx context.Context, meshIP string) (*PeersResponse,
 	return &out, nil
 }
 
-// pickRandomPeer возвращает случайного peer'а из local-state кроме нас самих.
-func pickRandomPeer(peers []state.Peer, selfPub string) *state.Peer {
-	candidates := make([]state.Peer, 0, len(peers))
-	for _, p := range peers {
-		if p.PublicKey == selfPub {
-			continue
-		}
-		// Не гoссипим к peer'ам без NodeIP (некорректное состояние).
-		if p.NodeIP == "" {
-			continue
-		}
-		candidates = append(candidates, p)
-	}
+// pickRandomPeer возвращает случайного peer'а из готового списка кандидатов
+// (фильтрация себя/достижимости — в mesh.GossipCandidates). nil если список пуст.
+func pickRandomPeer(candidates []state.Peer) *state.Peer {
 	if len(candidates) == 0 {
 		return nil
 	}

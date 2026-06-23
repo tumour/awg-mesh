@@ -86,14 +86,13 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		// Endpoint меняем только если прислан непустой, отличный и валидный по
 		// формату (мусор не должен попасть ни в state, ни в UAPI wg-device).
 		endpointChanged := r.Endpoint != "" && r.Endpoint != p.Endpoint
+		if endpointChanged && !validEndpoint(r.Endpoint) {
+			rejected = append(rejected, fmt.Sprintf("peer %s: invalid endpoint %q",
+				shortKey(p.PublicKey), r.Endpoint))
+			endpointChanged = false
+		}
 		if endpointChanged {
-			if _, _, err := net.SplitHostPort(r.Endpoint); err != nil {
-				rejected = append(rejected, fmt.Sprintf("peer %s: invalid endpoint %q",
-					shortKey(p.PublicKey), r.Endpoint))
-				endpointChanged = false
-			} else {
-				updated.Endpoint = r.Endpoint
-			}
+			updated.Endpoint = r.Endpoint
 		}
 		if r.Label != "" && r.Label != p.Label {
 			updated.Label = r.Label
@@ -121,10 +120,19 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		}
 		seenNew[r.PublicKey] = true
 		ipOwner[r.NodeIP] = r.PublicKey // защищает IP и от следующих peer'ов в этом же ответе
+		// Непустой кривой endpoint иначе попал бы в state, а UAPI wg-device его
+		// отверг бы (рассинхрон state↔device). Зануляем → peer initiator-only,
+		// валидный NodeIP сохраняем.
+		endpoint := r.Endpoint
+		if endpoint != "" && !validEndpoint(endpoint) {
+			rejected = append(rejected, fmt.Sprintf("peer %s: invalid endpoint %q (dropped)",
+				shortKey(r.PublicKey), endpoint))
+			endpoint = ""
+		}
 		newP := state.Peer{
 			Label:     r.Label,
 			PublicKey: r.PublicKey,
-			Endpoint:  r.Endpoint,
+			Endpoint:  endpoint,
 			NodeIP:    r.NodeIP,
 			IsSeed:    r.IsSeed,
 			LastSeen:  now,
@@ -137,8 +145,8 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 }
 
 // rejectNewPeer проверяет нового peer'а из gossip на безопасность mesh-IP.
-// "" — принять; иначе причина отказа. Endpoint-формат валидируется отдельно
-// (для нового peer'а пустой/кривой endpoint не угроза — он просто initiator-only).
+// "" — принять; иначе причина отказа. Endpoint валидируется отдельно у caller'а
+// (кривой непустой зануляется, чтобы не уехал рассинхрон state↔device).
 func rejectNewPeer(r state.Peer, ipOwner map[string]string, cidr *net.IPNet, cidrStr string) string {
 	ip := net.ParseIP(r.NodeIP)
 	if r.NodeIP == "" || ip == nil {
@@ -153,6 +161,13 @@ func rejectNewPeer(r state.Peer, ipOwner map[string]string, cidr *net.IPNet, cid
 			shortKey(r.PublicKey), r.NodeIP, shortKey(owner))
 	}
 	return ""
+}
+
+// validEndpoint — endpoint распарсивается как host:port. Пустой endpoint на
+// уровне домена валиден (peer initiator-only), поэтому непустоту проверяй отдельно.
+func validEndpoint(endpoint string) bool {
+	_, _, err := net.SplitHostPort(endpoint)
+	return err == nil
 }
 
 // shortKey укорачивает pubkey для лога/причин (полный — 44 base64-символа).
