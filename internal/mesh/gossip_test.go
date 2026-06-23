@@ -49,23 +49,38 @@ func TestGossipCandidatesSpokeDoesNotPickSpoke(t *testing.T) {
 	}
 }
 
-// Hub (у нас есть endpoint) может опрашивать всех — даже NAT-пиров, которые
-// держат к нам встречный туннель.
-func TestGossipCandidatesHubReachesAll(t *testing.T) {
-	// Мы = vps (hub, с endpoint). Подменим self на запись с endpoint.
+// Регресс на БАГ #1 (прод v0.4.0): hub (У НАС есть endpoint) тоже НЕ опрашивает
+// NAT-spoke. Инициировать gossip-pull к узлу без endpoint нельзя — его адрес wg
+// выучивает лишь динамически и теряет при рестарте (→ спам «no known endpoint» на
+// seed после рестарта), и незачем — spoke сам пуллит hub. Раньше тут был тест
+// HubReachesAll, который УТВЕРЖДАЛ багованное поведение и потому маскировал баг.
+func TestGossipCandidatesHubDoesNotPickSpoke(t *testing.T) {
+	// Мы = vps (hub, с endpoint); ax3200/flint2 — NAT-spoke без endpoint.
+	s := threeNodeState("VPS")
+	got := GossipCandidates(s)
+	if len(got) != 0 {
+		t.Fatalf("hub must NOT gossip-poll NAT spokes (no endpoint), got %v", keysOf(got))
+	}
+}
+
+// Два hub'а (оба с endpoint) опрашивают друг друга; NAT-spoke между ними отсекается.
+func TestGossipCandidatesHubPicksOtherHub(t *testing.T) {
 	s := &state.State{
-		PublicKey: "VPS",
+		PublicKey: "HUB1",
 		Peers: []state.Peer{
-			{Label: "vps", PublicKey: "VPS", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", IsSeed: true},
-			{Label: "ax3200", PublicKey: "AX", NodeIP: "100.64.0.2"},
-			{Label: "flint2", PublicKey: "FLINT", NodeIP: "100.64.0.3"},
+			{PublicKey: "HUB1", NodeIP: "100.64.0.1", Endpoint: "1.1.1.1:51820"},
+			{PublicKey: "HUB2", NodeIP: "100.64.0.5", Endpoint: "2.2.2.2:51820"},
+			{PublicKey: "SPOKE", NodeIP: "100.64.0.2"}, // NAT — отсечь
 		},
 	}
 	got := keysOf(GossipCandidates(s))
-	if !got["AX"] || !got["FLINT"] {
-		t.Fatalf("hub (self has endpoint) must reach NAT spokes too, got %v", got)
+	if !got["HUB2"] {
+		t.Fatal("hub must gossip the other hub (it has an endpoint)")
 	}
-	if got["VPS"] {
+	if got["SPOKE"] {
+		t.Fatal("hub must not gossip a NAT spoke")
+	}
+	if got["HUB1"] {
 		t.Fatal("must never target self")
 	}
 }
@@ -87,6 +102,23 @@ func TestGossipCandidatesSpokePicksAllHubs(t *testing.T) {
 	}
 	if got["SPOKE2"] {
 		t.Fatal("spoke must drop another NAT spoke")
+	}
+}
+
+// Все за NAT (ни у кого нет endpoint) → 0 кандидатов везде. Это НАМЕРЕННО: такой
+// mesh нефункционален by-design (никто никого не инициирует), gossip тут просто
+// нечего делать. Тест фиксирует, что пустой результат — ожидание, а не баг.
+func TestGossipCandidatesAllNATNoCandidates(t *testing.T) {
+	s := &state.State{
+		PublicKey: "A",
+		Peers: []state.Peer{
+			{PublicKey: "A", NodeIP: "100.64.0.2"}, // мы, NAT
+			{PublicKey: "B", NodeIP: "100.64.0.3"}, // NAT
+			{PublicKey: "C", NodeIP: "100.64.0.4"}, // NAT
+		},
+	}
+	if got := GossipCandidates(s); len(got) != 0 {
+		t.Fatalf("all-NAT mesh must yield 0 gossip candidates, got %v", keysOf(got))
 	}
 }
 

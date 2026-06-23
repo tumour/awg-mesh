@@ -3,6 +3,25 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.4.1] — 2026-06-24
+
+Багфиксы по итогам аудита трёх живых нод после 0.4.0.
+
+### Fixed
+- **gossip больше не спамит к NAT-узлам с hub'а** — `GossipCandidates` ошибочно
+  считал NAT-spoke достижимыми, если у НАС есть endpoint (`|| selfEndpoint != ""`).
+  Из-за этого seed/hub после рестарта слал handshake-инициации к узлам без
+  endpoint → лог-спам `no known endpoint for peer`. Теперь фильтр строго по
+  endpoint ПИРА (инициировать gossip-pull можно только к узлу с объявленным
+  адресом). Регресс-тесты на все топологии (hub↛spoke, hub↔hub, spoke→hub, all-NAT).
+- **`Linker.Delete` идемпотентен на OpenWrt** — проверка «интерфейса нет» матчила
+  только текст iproute2 (`Cannot find device`), а busybox `ip` (OpenWrt) пишет
+  `can't find device` → ложный WARN `cleanup stale interface failed` при каждом
+  старте демона на роутере. Матч обеих форм без учёта регистра.
+- **`ip`-команды форсируют `LC_ALL=C`** — idempotency-проверки матчат текст stdout;
+  под локализованной локалью сообщения переводились бы и матч ломался. Фиксируем
+  английский вывод.
+
 ## [0.4.0] — 2026-06-23
 
 Крупный релиз: апгрейд обфускации до актуальной линии AmneziaWG, закрытие
@@ -137,6 +156,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.4.1]: https://github.com/tumour/awg-mesh/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tumour/awg-mesh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tumour/awg-mesh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tumour/awg-mesh/compare/v0.1.3...v0.2.0

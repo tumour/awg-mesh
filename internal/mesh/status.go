@@ -71,30 +71,29 @@ func SelfEndpoint(s *state.State) string {
 	return ""
 }
 
-// reachablePeer — можем ли мы поднять прямой туннель к p: хотя бы одна сторона
-// объявила endpoint. Два узла за NAT (оба без endpoint) пути друг к другу не
-// имеют (NAT↔NAT не связывается — см. топологию hub-and-spoke в README).
-func reachablePeer(selfEndpoint string, p state.Peer) bool {
-	return p.Endpoint != "" || selfEndpoint != ""
-}
-
 // GossipCandidates — пиры, которых ИМЕЕТ СМЫСЛ gossip-опрашивать: не мы сами,
-// с валидным mesh-IP, и достижимые прямым туннелем (reachablePeer).
+// с валидным mesh-IP, и С ОБЪЯВЛЕННЫМ ENDPOINT'ом.
 //
-// Зачем фильтр достижимости: gossip к НЕдостижимому пиру (мы за NAT и он за NAT)
-// — это гарантированный HTTP-таймаут плюс каскад wg junk/handshake-retry в логах
-// («no known endpoint for peer»), и при этом НИКАКОГО обмена: peer-list между
-// двумя spoke всё равно течёт через hub-узел (с endpoint), который знает всех.
-// Так что заведомо-дохлый таргет = чистый шум, его и отсекаем.
+// Фильтр именно по endpoint ПИРА (а не по нашему): gossip-pull инициируем МЫ
+// (HTTP GET через туннель), а инициировать туннель можно только к узлу, чей
+// endpoint известен заранее — то есть к узлу С endpoint. Пир за NAT (без
+// endpoint) свой адрес не объявляет: wg выучивает его лишь динамически из
+// входящих keepalive и теряет при рестарте/expiry, поэтому gossip к нему
+// НЕНАДЁЖЕН (спам «no known endpoint») и БЕСПОЛЕЗЕН — spoke сам пуллит hub, а
+// hub-seed знает всех из bootstrap. Узел за NAT не опрашиваем НИ будучи spoke
+// (нет пути вообще), НИ будучи hub (его адрес нестабилен и обмен бессмыслен).
+//
+// NB: НАШ собственный endpoint в условие НЕ входит сознательно — наличие у нас
+// публичного адреса не делает чужой NAT-узел инициируемым (ловушка прошлой
+// версии: hub с endpoint считал все NAT-spoke достижимыми и спамил к ним).
 func GossipCandidates(s *state.State) []state.Peer {
-	selfEndpoint := SelfEndpoint(s)
 	out := make([]state.Peer, 0, len(s.Peers))
 	for _, p := range s.Peers {
 		if p.PublicKey == s.PublicKey || p.NodeIP == "" {
 			continue
 		}
-		if !reachablePeer(selfEndpoint, p) {
-			continue
+		if p.Endpoint == "" {
+			continue // за NAT — gossip-pull к нему инициировать нельзя
 		}
 		out = append(out, p)
 	}
