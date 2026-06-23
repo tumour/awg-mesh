@@ -44,6 +44,19 @@ jobs:
       - name: list artifacts
         run: ls -la bin/ dist/
 
+      # SHA256SUMS для проверки целостности — закрывает file-режим self-upgrade
+      # и ручные скачивания (apk-путь уже подписан, raw-бинари были голыми).
+      # NB: это только integrity. Для authenticity нужна подпись SHA256SUMS
+      # (minisign, gated на отдельном секрете) — см. README/known limitations.
+      - name: generate SHA256SUMS
+        run: |
+          sha256sum \
+            bin/meshd-linux-amd64 bin/meshd-linux-arm64 bin/meshd-linux-armv7 \
+            bin/meshd-linux-mipsle bin/meshd-linux-mips \
+            dist/meshd_*_amd64.deb dist/meshd_*_arm64.deb dist/meshd_*_openwrt-*.apk \
+            | awk '{ n=$2; sub(/.*\//,"",n); print $1"  "n }' > SHA256SUMS
+          cat SHA256SUMS
+
       # Тело релиза = секция CHANGELOG.md для этой версии (как у нормальных
       # пакетов), а не авто-список коммитов.
       - name: extract changelog for this release
@@ -62,6 +75,7 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           files: |
+            SHA256SUMS
             bin/meshd-linux-amd64
             bin/meshd-linux-arm64
             bin/meshd-linux-armv7

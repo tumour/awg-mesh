@@ -24,6 +24,11 @@ jobs:
       - name: go test
         run: go test ./... -race
 
+      # Известные CVE в зависимостях/stdlib — для крипто-VPN обязательно. govulncheck
+      # режет по реально вызываемому коду, не по всему графу. Версия пиннута (не @latest).
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...
+
       - name: build (all archs)
         run: make build-all
 
