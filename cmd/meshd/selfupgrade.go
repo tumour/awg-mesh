@@ -30,6 +30,9 @@ const (
 	// Бэкап и лог — в /tmp (tmpfs/RAM на OpenWrt): переживают рестарт демона и
 	// разрыв сессии (ровно окно работы watchdog'а), не занимают дефицитный
 	// flash роутера. Ребут их сотрёт — к тому моменту апгрейд уже решён.
+	// ОГРАНИЧЕНИЕ: на хостах с noexec-/tmp (харднутый Debian/Hetzner) watchdog из
+	// бэкапа не запустится → self-upgrade упадёт на arm watchdog, БЕЗОПАСНО (до
+	// подмены, нода цела). Тогда — обычный путь обновления по второму каналу.
 	upgradeBackupPath = "/tmp/meshd.upgrade-backup"
 	watchdogLogPath   = "/tmp/meshd-watchdog.log"
 
@@ -260,6 +263,13 @@ func applyUpgrade(lg *log.Logger, mode, target, newBin string) error {
 		// установки (standalone .apk помечен noarch) на arch-specific пакет фида —
 		// `apk upgrade` его бы проигнорировал как «другую арку». На уже-актуальной
 		// версии — no-op. apk сам заменит бинарь и вызовет postupgrade → рестарт.
+		//
+		// АСИММЕТРИЯ с file-режимом: там бинарь preflight'ится (BinaryVersion ДО
+		// подмены, пока связь цела). Здесь пакет ставится сразу — поломанный бинарь
+		// из фида поймает только health-rollback (лишние grace+probe секунды
+		// слепоты). Это by design: пакет ещё не скачан/не распакован, version-probe
+		// делать не на чем; supply-chain закрыт подписью фида, а «фид отдал битый
+		// пакет» — тот самый случай для отката.
 		lg.Printf("applying: apk update && apk add --latest meshd")
 		return runCmd(lg, applyTimeout, "sh", "-c", "apk update && apk add --latest meshd")
 	case "file":
@@ -271,6 +281,7 @@ func applyUpgrade(lg *log.Logger, mode, target, newBin string) error {
 		if argv == nil {
 			return fmt.Errorf("no init system detected to restart daemon")
 		}
+		resetDaemonStartLimit(lg)
 		return runCmd(lg, restartTimeout, argv[0], argv[1:]...)
 	default:
 		return fmt.Errorf("unknown apply mode %q", mode)
@@ -289,11 +300,26 @@ func rollback(lg *log.Logger, target, backup string) {
 		lg.Printf("binary restored, but no init system to restart it — reboot likely needed")
 		return
 	}
+	resetDaemonStartLimit(lg)
 	if err := runCmd(lg, restartTimeout, argv[0], argv[1:]...); err != nil {
 		lg.Printf("rollback restart FAILED: %v", err)
 		return
 	}
 	lg.Printf("rolled back and restarted daemon (%s)", strings.Join(argv, " "))
+}
+
+// resetDaemonStartLimit снимает systemd start-limit ПЕРЕД рестартом. Иначе, если
+// новый бинарь крэшил в цикле (Restart=on-failure, RestartSec=5s), за grace+probe-
+// окно systemd упрётся в StartLimitBurst (дефолт 5/10с) и уведёт юнит в failed —
+// и наш же `systemctl restart` для ОТКАТА отлетит «start request repeated too
+// quickly», оставив ноду мёртвой ровно в сценарии, ради которого откат и нужен.
+// На procd аналога start-limit нет — no-op. reset-failed безвреден, если юнит не
+// в failed; best-effort.
+func resetDaemonStartLimit(lg *log.Logger) {
+	if !hasSystemdUnit() {
+		return
+	}
+	_ = runCmd(lg, restartTimeout, "systemctl", "reset-failed", "meshd")
 }
 
 // runCmd запускает команду с таймаутом — защита от зависшего apk/systemctl,

@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"os"
 	"sync"
 )
 
@@ -17,8 +18,11 @@ var ErrNoChange = errors.New("state unchanged")
 // (worst case: регистрация peer'а затирается gossip-merge'ем, и следующий
 // join получает тот же mesh-IP).
 //
-// Защищает только внутри процесса. Межпроцессные гонки (meshd run + meshd
-// serve одновременно) вне scope — systemd гарантирует один экземпляр демона.
+// Внутри процесса сериализует mutex; МЕЖДУ процессами (meshd join при живом
+// meshd run — разные процессы, разные mutex'ы, один файл) Update берёт ещё и
+// flock на <path>.lock. Без него resume-join и gossip-merge затёрли бы друг
+// друга last-write-wins → потерянная регистрация → дубль mesh-IP. На Windows
+// flock пока no-op (демон под Windows не цель, см. lock_windows.go).
 type Store struct {
 	mu   sync.Mutex
 	path string
@@ -30,6 +34,21 @@ func NewStore(path string) *Store {
 		path = DefaultPath
 	}
 	return &Store{path: path}
+}
+
+// lockState берёт cross-process flock на стабильном <path>.lock (НЕ на самом
+// state: его rename при Save меняет inode и сломал бы flock). Возвращает
+// unlock-функцию, либо nil, если открыть файл или взять лок не удалось.
+func lockState(path string) func() {
+	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil
+	}
+	if err := flockExclusive(lf); err != nil {
+		_ = lf.Close()
+		return nil
+	}
+	return func() { flockUnlock(lf); _ = lf.Close() }
 }
 
 // Read возвращает свежий снапшот state с диска.
@@ -46,6 +65,13 @@ func (st *Store) Read() (*State, error) {
 func (st *Store) Update(fn func(*State) error) (*State, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
+
+	// Cross-process lock; nil-unlock = лок взять не вышло, продолжаем только под
+	// внутрипроцессным mutex'ом (best-effort).
+	if unlock := lockState(st.path); unlock != nil {
+		defer unlock()
+	}
+
 	s, err := Load(st.path)
 	if err != nil {
 		return nil, err

@@ -41,7 +41,9 @@ type JoinResult struct {
 // напрямую).
 //
 // Идемпотентность: повторный join с тем же keypair'ом → seed вернёт прежний IP.
-// Запись через Store при resume (RMW-safe, если демон уже крутится в процессе).
+// Запись при resume — через Store.Update под flock: cross-process-safe (unix)
+// даже если демон уже крутится и параллельно мерджит gossip (на Windows flock
+// пока no-op — там не делай join при живом демоне).
 func Join(p JoinParams) (JoinResult, error) {
 	if p.Label == "" {
 		return JoinResult{}, fmt.Errorf("label is required")
@@ -127,7 +129,7 @@ func Join(p JoinParams) (JoinResult, error) {
 	}
 
 	if existing != nil {
-		// resume — атомарная замена через Store (RMW-safe при живом демоне).
+		// resume — атомарная замена через Store.Update (под flock, cross-process-safe).
 		newState.CreatedAt = existing.CreatedAt
 		if _, err := store.Update(func(s *state.State) error {
 			*s = *newState

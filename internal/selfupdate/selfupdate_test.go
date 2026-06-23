@@ -33,8 +33,8 @@ func TestCopyAndReplaceBinary(t *testing.T) {
 	if fi.Mode().Perm() != 0o755 {
 		t.Fatalf("want mode 0755, got %v", fi.Mode().Perm())
 	}
-	// Промежуточный .new не должен оставаться.
-	if _, err := os.Stat(target + ".new"); !os.IsNotExist(err) {
-		t.Fatal("leftover .new temp file after ReplaceBinary")
+	// Промежуточный tmp-файл не должен оставаться после успешной замены.
+	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("leftover .tmp temp file after ReplaceBinary")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/fsutil"
 )
 
 // DefaultPath — стандартное место хранения state.json (chmod 600). Зависит от
@@ -88,7 +89,10 @@ func Load(path string) (*State, error) {
 	return &s, nil
 }
 
-// Save атомарно пишет state.json через tmp+rename. chmod 600.
+// Save durable и атомарно пишет state.json (chmod 600). Потеря state.json =
+// потеря приватника и cluster identity (на seed'е ещё и peer-list), поэтому
+// запись идёт через fsutil.WriteFile (tmp+fsync+rename+fsync-dir) — durable
+// против потери питания на роутере, а не только атомарная против чтения.
 func (s *State) Save(path string) error {
 	if path == "" {
 		path = DefaultPath
@@ -104,15 +108,7 @@ func (s *State) Save(path string) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
-	}
-	return nil
+	return fsutil.WriteFile(path, data, 0600)
 }
 
 // ErrNotInitialized — state.json отсутствует, нода ещё не сделала init/join.

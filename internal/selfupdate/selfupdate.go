@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tumour/awg-mesh/internal/fsutil"
 )
 
 // versionProbeTimeout — лимит на `<bin> version` (заодно проверка исполнимости).
@@ -72,29 +74,21 @@ func SpawnDetached(name string, args []string, logPath string) error {
 	return cmd.Start()
 }
 
-// CopyFile копирует src→dst с правами mode (перезаписывая dst).
+// CopyFile durable копирует src→dst с правами mode (перезаписывая dst) через
+// fsutil.WriteFile (tmp+fsync+rename+fsync-dir).
 func CopyFile(src, dst string, mode os.FileMode) error {
 	data, err := os.ReadFile(src) // бинарь ~8 MB — спокойно влезает в RAM
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(dst, data, mode); err != nil {
-		return err
-	}
-	return os.Chmod(dst, mode) // WriteFile не трогает права, если файл уже был
+	return fsutil.WriteFile(dst, data, mode)
 }
 
-// ReplaceBinary атомарно заменяет target содержимым src: пишем target.new и
-// rename'им поверх. Работающий процесс держит старый inode, поэтому ETXTBSY
-// (text file busy) не словим, а rename атомарен в пределах одной FS.
+// ReplaceBinary durable и атомарно заменяет target содержимым src. Durability
+// критична: потеря питания посреди подмены /usr/bin/meshd без fsync даёт бинарь
+// нулевой длины, а watchdog/бэкап лежат в /tmp (tmpfs) и ребут их стёр —
+// единственный по mesh доступ к ноде превратится в кирпич. Атомарность (rename)
+// заодно избавляет от ETXTBSY: работающий процесс держит старый inode.
 func ReplaceBinary(target, src string, mode os.FileMode) error {
-	tmp := target + ".new"
-	if err := CopyFile(src, tmp, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return CopyFile(src, target, mode)
 }
