@@ -13,13 +13,8 @@ import (
 	"os"
 )
 
-var (
-	// version — выставляется через -ldflags="-X main.version=..." при сборке.
-	version = "dev"
-
-	// Глобальный --state-file флаг, по умолчанию /etc/meshd/state.json.
-	stateFile string
-)
+// version — выставляется через -ldflags="-X main.version=..." при сборке.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {

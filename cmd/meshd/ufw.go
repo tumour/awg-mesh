@@ -48,9 +48,12 @@ func ufwStatus() (bool, string) {
 // ufwMeshRuleExists — есть ли уже правило, пропускающее gossip с awg0.
 // В `ufw status` правило 'allow in on awg0' выглядит как "Anywhere on awg0",
 // а 'allow in on awg0 to any port 9100 proto tcp' — как "9100/tcp on awg0".
+// Имя интерфейса матчим с trailing-границей (" awg0 "), иначе awg0 ложно
+// сматчился бы как префикс awg00/awg0x (в ufw-таблице после iface всегда колонка).
 func ufwMeshRuleExists(rules string) bool {
-	return strings.Contains(rules, "Anywhere on "+meshIfaceName) ||
-		strings.Contains(rules, fmt.Sprintf("%d/tcp on %s", gossip.DefaultPort, meshIfaceName))
+	on := " on " + meshIfaceName + " "
+	return strings.Contains(rules, "Anywhere"+on) ||
+		strings.Contains(rules, fmt.Sprintf("%d/tcp%s", gossip.DefaultPort, on))
 }
 
 // applyUFWMode — выполняет opt-in настройку по флагу --ufw. Пустой mode —

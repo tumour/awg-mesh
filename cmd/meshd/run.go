@@ -25,6 +25,10 @@ func cmdRun(args []string) error {
 	fs.Parse(args)
 
 	logger := newDaemonLogger()
+	// SetDefault — здесь ОК: это CLI-точка входа, демон владеет процессом, и либы,
+	// дёргающие slog.Default(), получат наш sink. node.Run глобал НЕ трогает
+	// (логгер инъектится через Options) — поэтому встраивание meshd в чужой процесс
+	// не перетопчет его slog.Default().
 	slog.SetDefault(logger)
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
