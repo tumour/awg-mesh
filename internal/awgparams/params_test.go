@@ -2,6 +2,42 @@ package awgparams
 
 import "testing"
 
+// amneziawg-go реджектит конфиг, если padded init и response одного размера
+// (wgInitMsgSize+S1 == wgResponseMsgSize+S2). ~0.43% случайных пар коллидируют,
+// поэтому 5000 прогонов без фикса почти наверняка поймали бы регресс (ожидание
+// ~21 коллизия), а с фиксом — строго 0.
+func TestGenerateS1S2NeverCollide(t *testing.T) {
+	for i := 0; i < 5000; i++ {
+		p, err := Generate()
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if wgInitMsgSize+p.S1 == wgResponseMsgSize+p.S2 {
+			t.Fatalf("init+S1 == response+S2 (%d): amneziawg-go would reject IpcSet; S1=%d S2=%d",
+				wgInitMsgSize+p.S1, p.S1, p.S2)
+		}
+	}
+}
+
+func TestValidHeaders(t *testing.T) {
+	cases := []struct {
+		name string
+		hs   [4]uint32
+		want bool
+	}{
+		{"all distinct and >4", [4]uint32{5, 6, 7, 8}, true},
+		{"contains reserved 4", [4]uint32{4, 6, 7, 8}, false},
+		{"contains reserved 0", [4]uint32{0, 6, 7, 8}, false},
+		{"duplicate", [4]uint32{5, 5, 7, 8}, false},
+		{"large distinct", [4]uint32{100, 200, 300, 400}, true},
+	}
+	for _, c := range cases {
+		if got := validHeaders(c.hs); got != c.want {
+			t.Errorf("%s: validHeaders(%v) = %v, want %v", c.name, c.hs, got, c.want)
+		}
+	}
+}
+
 func TestGenerateWithinRecommendedRanges(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		p, err := Generate()
