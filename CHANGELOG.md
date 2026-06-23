@@ -3,6 +3,54 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.4.0] — 2026-06-23
+
+Крупный релиз: апгрейд обфускации до актуальной линии AmneziaWG, закрытие
+security-векторов control plane, надёжность записи на роутерах и большой
+рефакторинг доменного ядра.
+
+### Security
+- **Identity binding на bootstrap** — seed регистрирует только тот pubkey, которым
+  клиент реально прошёл Noise-handshake (`hs.PeerStatic()` == заявленный). Раньше
+  нода с cluster-secret могла зарегистрировать фантомный чужой pubkey.
+- **Anti-hijack в gossip-merge** — новый peer отвергается, если его mesh-IP уже
+  принадлежит другому pubkey, вне network-CIDR или невалиден. Закрывает угон
+  cryptokey-routing (`/32`) и перехват трафика соседа одной злой нодой.
+- **Лимит конкурентных bootstrap-handshake'ей** — публичный порт seed'а считает
+  Noise (Curve25519) до проверки PSK; семафор не даёт потоку коннектов истощить
+  CPU/горутины/FD.
+
+### Changed
+- **Bump amneziawg-go v1.0.4 → v0.2.19** — актуальная поддерживаемая линия
+  (v1.0.4 — orphan-тег, снят апстримом). Wire-совместимо со старыми нодами
+  (одиночный H = вырожденный диапазон [X,X]); подтверждено interop old↔new на
+  живой mixed-сети. Go 1.26.2 → 1.26.4.
+- **Рефакторинг ядра** — домен вынесен в `internal/mesh` (платформо-независимый,
+  единый backend для CLI/`--json`/будущего web), транспорт в
+  `internal/bootstrap`+`internal/gossip`, оркестрация в `internal/node`; ОС-вызовы
+  за build-tags (`wg.Linker`); единый wire-DTO + framing-примитив; декомпозиция
+  self-upgrade (`internal/health`, `internal/selfupdate`); структурное логирование
+  (`slog`) с инъекцией логгера. Добавлен `meshd status --json`.
+
+### Added
+- **Durable запись** state.json и бинаря при self-upgrade (fsync файла+директории
+  через `internal/fsutil`) — переживает потерю питания на роутере.
+- **Cross-process flock** на state — `meshd join` при живом демоне больше не теряет
+  выученные через gossip peer'ы.
+- **govulncheck в CI** (пиннут) и **SHA256SUMS** на релизе.
+
+### Fixed
+- **awgparams S1/S2 + H>4** — `Generate` гарантирует, что padded init/response
+  различаются по размеру (иначе amneziawg-go реджектит конфиг → awg-params общие,
+  вся сеть не стартует; раньше ~0.43% генераций) и что H-заголовки > 4 (иначе
+  молчаливый откат на стандартный message-type без обфускации).
+- **gossip не опрашивает недостижимых NAT-пиров** (spoke↔spoke) — убирает спам
+  `no known endpoint` + бесполезные таймауты в логах роутеров.
+- **self-upgrade watchdog** зовёт `systemctl reset-failed` перед рестартом —
+  systemd start-limit больше не блокирует авто-откат при крэш-лупе.
+- Валидация endpoint нового peer в merge, точная граница имени интерфейса в
+  ufw-детекции, и прочие правки корректности из ревью.
+
 ## [0.3.0] — 2026-06-21
 
 ### Added
@@ -89,6 +137,7 @@
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.4.0]: https://github.com/tumour/awg-mesh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tumour/awg-mesh/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tumour/awg-mesh/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/tumour/awg-mesh/compare/v0.1.2...v0.1.3

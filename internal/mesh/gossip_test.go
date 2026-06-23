@@ -14,7 +14,7 @@ func threeNodeState(selfPub string) *state.State {
 		NetworkCIDR: "100.64.0.0/24",
 		Peers: []state.Peer{
 			{Label: "vps", PublicKey: "VPS", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", IsSeed: true},
-			{Label: "ax3200", PublicKey: "AX", NodeIP: "100.64.0.2"}, // NAT, без endpoint
+			{Label: "ax3200", PublicKey: "AX", NodeIP: "100.64.0.2"},    // NAT, без endpoint
 			{Label: "flint2", PublicKey: "FLINT", NodeIP: "100.64.0.3"}, // NAT, без endpoint
 		},
 	}
