@@ -254,22 +254,11 @@ sudo apt-get install meshd        # установка (или обновлен�
 ```
 
 Обновление потом — `sudo apt-get update && sudo apt-get install --only-upgrade meshd`
-(postinst рестартует демон, если уже есть `state.json`). **Если GitHub заблокирован**
-(актуально для РФ) — зеркало через jsDelivr CDN (хост
-`cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages` вместо `tumour.github.io/awg-mesh`):
-
-```bash
-sudo wget -qO /etc/apt/keyrings/awg-mesh.asc \
-  https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/debian/meshd-archive-keyring.asc
-echo "deb [signed-by=/etc/apt/keyrings/awg-mesh.asc] https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/debian stable main" \
-  | sudo tee /etc/apt/sources.list.d/awg-mesh.list
-sudo apt-get update
-```
+(postinst рестартует демон, если уже есть `state.json`).
 
 Репозиторий собирается и подписывается в release-CI (`deploy/debian/build-apt-repo.sh`),
-публикуется на GitHub Pages (ветка `gh-pages`, дерево `debian/`). Приватный ключ
-подписи — в repo-secret `APT_SIGN_KEY`, публичный лежит в репо
-(`deploy/debian/meshd-archive-keyring.asc`).
+публикуется на GitHub Pages (дерево `debian/`). Приватный ключ подписи — в repo-secret
+`APT_SIGN_KEY`, публичный лежит в репо (`deploy/debian/meshd-archive-keyring.asc`).
 
 ## Подключение apk-фида (OpenWrt 25.12+)
 
@@ -297,19 +286,10 @@ apk add meshd        # установка (или обновление, если
 > `apk upgrade` работает штатно. `meshd self-upgrade` делает это правильно сам.
 
 HTTPS к GitHub Pages требует SSL-пакета на роутере — при ошибке сертификата
-поставь корни: `apk add ca-bundle`. **Если GitHub заблокирован** (актуально для
-РФ) — зеркало через jsDelivr CDN:
-
-```sh
-echo "https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
-  > /etc/apk/repositories.d/awg-mesh.list
-wget https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/awg-mesh-apk.rsa.pub \
-  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
-apk update
-```
+поставь корни: `apk add ca-bundle`.
 
 Фид собирается и подписывается в release-CI (`deploy/openwrt/build-feed.sh`),
-публикуется на GitHub Pages (ветка `gh-pages`). Приватный ключ подписи — в
+публикуется на GitHub Pages (дерево `openwrt/`). Приватный ключ подписи — в
 repo-secret `APK_SIGN_KEY`, публичный лежит в репо
 (`deploy/openwrt/awg-mesh-apk.rsa.pub`).
 
