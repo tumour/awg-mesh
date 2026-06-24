@@ -221,20 +221,20 @@ func handleConn(
 	authedPub := base64.StdEncoding.EncodeToString(hs.PeerStatic())
 	if req.PublicKey != authedPub {
 		clog.Warn("identity mismatch: claimed pubkey != Noise static key",
-			"claimed", shortKey(req.PublicKey), "authenticated", shortKey(authedPub))
+			"claimed", mesh.ShortKey(req.PublicKey), "authenticated", mesh.ShortKey(authedPub))
 		respondErr(conn, csServerToClient, "identity mismatch")
 		return false
 	}
 
 	// Endpoint опционален (NAT-ноды его не объявляют), но если есть — обязан быть
-	// валидным host:port: он уйдёт всем нодам в UAPI wg-device.
-	if req.Endpoint != "" {
-		if _, _, err := net.SplitHostPort(req.Endpoint); err != nil {
-			clog.Warn("invalid endpoint", "endpoint", req.Endpoint, "label", req.Label, "err", err)
-			respondErr(conn, csServerToClient,
-				fmt.Sprintf("invalid endpoint %q (want host:port)", req.Endpoint))
-			return false
-		}
+	// валидным host:port (числовой порт): он уйдёт всем нодам в UAPI wg-device.
+	// mesh.ValidEndpoint — та же граница, что в gossip-merge (без неё seed принял бы
+	// «host:notaport», разослал бы gossip'ом, а merge отверг бы → рассинхрон).
+	if req.Endpoint != "" && !mesh.ValidEndpoint(req.Endpoint) {
+		clog.Warn("invalid endpoint", "endpoint", req.Endpoint, "label", req.Label)
+		respondErr(conn, csServerToClient,
+			fmt.Sprintf("invalid endpoint %q (want host:port)", req.Endpoint))
+		return false
 	}
 
 	// Регистрация атомарна: идемпотентность, аллокация IP и append (доменная
@@ -268,7 +268,7 @@ func handleConn(
 		clog.Info("peer re-joined (returning existing)", "label", req.Label, "ip", reg.AssignedIP)
 	} else {
 		clog.Info("peer registered", "label", req.Label, "ip", reg.AssignedIP,
-			"endpoint", req.Endpoint, "pubkey", shortKey(req.PublicKey))
+			"endpoint", req.Endpoint, "pubkey", mesh.ShortKey(req.PublicKey))
 	}
 
 	respondOK(conn, csServerToClient, snap, reg.AssignedIP, clog)
@@ -296,11 +296,4 @@ func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP stri
 	if err := proto.WriteMessage(conn, cs, resp); err != nil {
 		logger.Warn("write hello-resp failed", "err", err)
 	}
-}
-
-func shortKey(k string) string {
-	if len(k) > 12 {
-		return k[:8] + "..."
-	}
-	return k
 }

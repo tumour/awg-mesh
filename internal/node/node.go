@@ -174,9 +174,12 @@ func Run(ctx context.Context, opts Options) error {
 	<-ctx.Done()
 	logger.Info("received signal, shutting down")
 
-	if err := linker.SetDown(device.Name()); err != nil {
-		logger.Warn("interface down failed", "iface", device.Name(), "err", err)
-	}
+	// Линк явно НЕ опускаем: awg0 — userspace-TUN, defer device.Close() выше
+	// удаляет интерфейс целиком (адрес уходит вместе с ним), так что SetDown
+	// здесь избыточен. Под systemd он ещё и шумел ложным WARN'ом: KillMode=
+	// control-group шлёт SIGTERM всей cgroup → дочерний `ip link set down`
+	// гибнет с «signal: terminated» (на procd-роутерах этого нет). На связность
+	// mesh не влияло — только лишняя строка в логе на каждый рестарт.
 	return nil
 }
 

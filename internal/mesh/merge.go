@@ -7,6 +7,7 @@ package mesh
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/state"
@@ -16,13 +17,20 @@ import (
 // Работает на доменной модели state.Peer (caller конвертирует свой wire-тип в
 // state.Peer заранее — домен не знает про gossip/proto-форматы).
 //
-// Возвращает (merged, changed, rejected):
+// Возвращает (merged, changed, rejected, persist):
 //
-//	merged   — полный новый список для state.Peers (обновлённые endpoint'ы
-//	           существующих peer'ов + refresh'нутые LastSeen).
+//	merged   — полный новый список для state.Peers (обновлённые endpoint/label/
+//	           IsSeed существующих peer'ов + refresh'нутые LastSeen).
 //	changed  — что пушить в wg-device через UpdatePeer (новые peers + те, у кого
-//	           сменился endpoint). Pure refresh LastSeen в changed не идёт.
+//	           сменился endpoint). Pure refresh LastSeen / label / IsSeed в changed
+//	           не идёт — на wg-маршрутизацию они не влияют.
 //	rejected — человекочитаемые причины отказа (для лога caller'ом).
+//	persist  — надо ли писать merged на диск. Это ОТДЕЛЬНЫЙ вопрос от changed:
+//	           label/IsSeed-обновления значимы для state, но не для wg-device, так
+//	           что попадают в persist, но не в changed. Чистый refresh LastSeen в
+//	           persist НЕ идёт сознательно — иначе писали бы файл каждый gossip-цикл
+//	           (flash-wear на роутере); LastSeen долетит на диск с ближайшей реальной
+//	           записью. Caller решает запись по persist, НЕ по len(changed).
 //
 // БЕЗОПАСНОСТЬ (trust-by-tunneling плоское: любая нода в mesh может прислать
 // произвольный peer-list). Чтобы одна нода не угнала чужой mesh-IP/маршрут,
@@ -41,7 +49,7 @@ import (
 // peer'а. MergePeers применяет смену endpoint'а от любого источника (last-pull-wins),
 // поэтому злая нода может перенаправить трафик к соседу в никуда (DoS). Здесь
 // валидируется только ФОРМАТ endpoint'а, не его подлинность.
-func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged, changed []state.Peer, rejected []string) {
+func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged, changed []state.Peer, rejected []string, persist bool) {
 	// Индекс remote по pubkey, заодно отфильтровываем себя.
 	rByKey := make(map[string]state.Peer, len(remote))
 	for _, r := range remote {
@@ -86,24 +94,31 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		// Endpoint меняем только если прислан непустой, отличный и валидный по
 		// формату (мусор не должен попасть ни в state, ни в UAPI wg-device).
 		endpointChanged := r.Endpoint != "" && r.Endpoint != p.Endpoint
-		if endpointChanged && !validEndpoint(r.Endpoint) {
+		if endpointChanged && !ValidEndpoint(r.Endpoint) {
 			rejected = append(rejected, fmt.Sprintf("peer %s: invalid endpoint %q",
-				shortKey(p.PublicKey), r.Endpoint))
+				ShortKey(p.PublicKey), r.Endpoint))
 			endpointChanged = false
 		}
 		if endpointChanged {
 			updated.Endpoint = r.Endpoint
 		}
-		if r.Label != "" && r.Label != p.Label {
+		labelChanged := r.Label != "" && r.Label != p.Label
+		if labelChanged {
 			updated.Label = r.Label
 		}
-		if r.IsSeed != p.IsSeed {
+		seedChanged := r.IsSeed != p.IsSeed
+		if seedChanged {
 			updated.IsSeed = r.IsSeed
 		}
 		merged = append(merged, updated)
-		// В wg-device пушим только при endpoint-смене — label/IsSeed на wg не влияют.
+		// changed → пуш в wg-device (только endpoint-смена; label/IsSeed на wg не влияют).
 		if endpointChanged {
 			changed = append(changed, updated)
+		}
+		// persist → запись на диск: любое значимое изменение (endpoint/label/IsSeed),
+		// но НЕ чистый LastSeen-refresh (иначе писали бы файл каждый цикл — flash-wear).
+		if endpointChanged || labelChanged || seedChanged {
+			persist = true
 		}
 	}
 
@@ -124,9 +139,9 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		// отверг бы (рассинхрон state↔device). Зануляем → peer initiator-only,
 		// валидный NodeIP сохраняем.
 		endpoint := r.Endpoint
-		if endpoint != "" && !validEndpoint(endpoint) {
+		if endpoint != "" && !ValidEndpoint(endpoint) {
 			rejected = append(rejected, fmt.Sprintf("peer %s: invalid endpoint %q (dropped)",
-				shortKey(r.PublicKey), endpoint))
+				ShortKey(r.PublicKey), endpoint))
 			endpoint = ""
 		}
 		newP := state.Peer{
@@ -139,9 +154,10 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		}
 		merged = append(merged, newP)
 		changed = append(changed, newP)
+		persist = true // новый peer — пишем на диск
 	}
 
-	return merged, changed, rejected
+	return merged, changed, rejected, persist
 }
 
 // rejectNewPeer проверяет нового peer'а из gossip на безопасность mesh-IP.
@@ -150,28 +166,43 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 func rejectNewPeer(r state.Peer, ipOwner map[string]string, cidr *net.IPNet, cidrStr string) string {
 	ip := net.ParseIP(r.NodeIP)
 	if r.NodeIP == "" || ip == nil {
-		return fmt.Sprintf("peer %s: invalid node_ip %q", shortKey(r.PublicKey), r.NodeIP)
+		return fmt.Sprintf("peer %s: invalid node_ip %q", ShortKey(r.PublicKey), r.NodeIP)
 	}
 	if cidr != nil && !cidr.Contains(ip) {
 		return fmt.Sprintf("peer %s: node_ip %s outside mesh cidr %s",
-			shortKey(r.PublicKey), r.NodeIP, cidrStr)
+			ShortKey(r.PublicKey), r.NodeIP, cidrStr)
 	}
 	if owner, taken := ipOwner[r.NodeIP]; taken && owner != r.PublicKey {
 		return fmt.Sprintf("peer %s: node_ip %s already owned by %s (ip-hijack rejected)",
-			shortKey(r.PublicKey), r.NodeIP, shortKey(owner))
+			ShortKey(r.PublicKey), r.NodeIP, ShortKey(owner))
 	}
 	return ""
 }
 
-// validEndpoint — endpoint распарсивается как host:port. Пустой endpoint на
-// уровне домена валиден (peer initiator-only), поэтому непустоту проверяй отдельно.
-func validEndpoint(endpoint string) bool {
-	_, _, err := net.SplitHostPort(endpoint)
-	return err == nil
+// ValidEndpoint — endpoint имеет вид host:port с НЕПУСТЫМ host и ЧИСЛОВЫМ port.
+// net.SplitHostPort сам по себе пропускает «host:notaport» и «:port» — а такой
+// «endpoint» дошёл бы до UAPI wg-device и был бы отвергнут уже там (а hostname ещё
+// и дёрнул бы блокирующий DNS-resolve в gossip-горутине). Поэтому порт проверяем
+// явно. Пустой endpoint валиден на уровне домена (peer initiator-only) — непустоту
+// проверяй отдельно. Используется и merge (gossip), и bootstrap (join) — единая граница.
+//
+// NB: hostname:port здесь проходит (host непустой) — endpoint у нас может быть и
+// hostname'ом. Если потребуется строго IP:port (убрать DNS из IpcSet) — netip.ParseAddrPort.
+func ValidEndpoint(endpoint string) bool {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" {
+		return false
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return false
+	}
+	return true
 }
 
-// shortKey укорачивает pubkey для лога/причин (полный — 44 base64-символа).
-func shortKey(k string) string {
+// ShortKey укорачивает pubkey для лога/причин (полный — 44 base64-символа).
+// Экспортирован, чтобы транспорт (bootstrap/gossip) не дублировал тот же helper:
+// mesh — нижний слой, его уже импортируют все control-plane-пакеты.
+func ShortKey(k string) string {
 	if len(k) > 12 {
 		return k[:8] + "..."
 	}

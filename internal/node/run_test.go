@@ -100,11 +100,11 @@ func TestRunOrchestratesDeviceAndLinker(t *testing.T) {
 	}
 
 	// Delete по запрошенному имени (awg0), остальное по реальному (awgtest0).
+	// SetDown на shutdown НЕ зовём — device.Close() (defer) удаляет TUN целиком.
 	want := []string{
 		"Delete awg0",
 		"AddIP awgtest0 127.0.0.1/24",
 		"SetUp awgtest0",
-		"SetDown awgtest0",
 	}
 	if !reflect.DeepEqual(lnk.ops, want) {
 		t.Errorf("linker ops\n  got:  %v\n  want: %v", lnk.ops, want)

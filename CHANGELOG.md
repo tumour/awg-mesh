@@ -3,6 +3,35 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.4.2] — 2026-06-24
+
+Багфиксы control plane по итогам ревью 0.4.1 + закрытие тех-долга.
+
+### Fixed
+- **gossip больше не теряет обновления `label`/`is_seed`** — `doRound` решал, писать
+  ли state на диск, по числу изменений для wg-device (`changed`), но `label`/`is_seed`
+  на wg-маршрутизацию не влияют и в `changed` не попадали → молча терялись.
+  `MergePeers` теперь возвращает отдельный флаг `persist` (значимое для диска ≠ что
+  пушить в device), `doRound` пишет по нему. Чистый refresh `LastSeen` по-прежнему НЕ
+  персистится (flash-wear на роутерах).
+- **Ужесточена валидация endpoint'а (`mesh.ValidEndpoint`)** — `net.SplitHostPort`
+  пропускал `host:notaport` и `:port`; такой «endpoint» доходил до UAPI wg-device
+  (отказ уже там), а hostname ещё и дёрнул бы блокирующий DNS в gossip-горутине.
+  Теперь явная проверка непустого host + числового порта — единая граница и в
+  gossip-merge, и в bootstrap-join (иначе seed принял бы кривой endpoint, а merge
+  отверг → рассинхрон state↔device).
+- **Убран ложный WARN `interface down failed` на shutdown (systemd)** — `node.Run`
+  на остановке звал `ip link set down awg0`, а `KillMode=control-group` уже слал
+  SIGTERM всей cgroup → дочерний `ip` умирал с «signal: terminated». Вызов избыточен
+  (`awg0` — userspace-TUN, его целиком сносит `device.Close()`), убран. На procd-
+  роутерах проблемы не было.
+
+### Internal
+- Юнит-тесты на gossip-транспорт (`doRound`/`handlePeers`) — раньше был покрыт лишь
+  доменный `MergePeers`, а persist-баг жил именно в транспорте.
+- Helper `shortKey` (был продублирован в mesh и bootstrap) сведён к единому
+  `mesh.ShortKey`.
+
 ## [0.4.1] — 2026-06-24
 
 Багфиксы по итогам аудита трёх живых нод после 0.4.0.
@@ -156,6 +185,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.4.2]: https://github.com/tumour/awg-mesh/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/tumour/awg-mesh/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tumour/awg-mesh/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tumour/awg-mesh/compare/v0.2.0...v0.3.0
