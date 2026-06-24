@@ -45,6 +45,9 @@ sudo dpkg -i meshd_0.2.0_amd64.deb
 - systemd-юнит в `/lib/systemd/system/meshd.service` (enabled, но не started — daemon ждёт state.json)
 - директория `/etc/meshd/` (chmod 700, для state и ключей)
 
+Для автообновлений подключи [apt-репозиторий](#подключение-apt-репозитория-debianubuntu) —
+тогда установка и апгрейд идут через `apt-get install meshd` без ручного скачивания.
+
 Для OpenWrt-роутеров есть `.apk`-пакет — см. секцию
 [Установка на OpenWrt](#установка-на-openwrt-2512).
 
@@ -231,6 +234,42 @@ meshd token --quiet    # только сам токен (для скриптов
 Работает на **любой** ноде, не только на seed: cluster-secret общий, а seed-инфо
 есть в peer-list каждого узла (разносится gossip'ом). Это согласуется с моделью
 «кто владеет токеном — тот в mesh» (см. [Безопасность](#безопасность)).
+
+## Подключение apt-репозитория (Debian/Ubuntu)
+
+Подписанный репозиторий позволяет ставить и обновлять meshd как любой системный
+пакет — `apt-get install meshd`, без ручного скачивания `.deb`. Доверие — по
+OpenPGP-подписи репозитория (`signed-by`), настраивается один раз:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+# доверяемый публичный ключ репозитория:
+sudo wget -qO /etc/apt/keyrings/awg-mesh.asc \
+  https://tumour.github.io/awg-mesh/debian/meshd-archive-keyring.asc
+# источник (suite=stable — один пакет на все Debian/Ubuntu, арки amd64/arm64):
+echo "deb [signed-by=/etc/apt/keyrings/awg-mesh.asc] https://tumour.github.io/awg-mesh/debian stable main" \
+  | sudo tee /etc/apt/sources.list.d/awg-mesh.list
+sudo apt-get update
+sudo apt-get install meshd        # установка (или обновление, если уже стоит)
+```
+
+Обновление потом — `sudo apt-get update && sudo apt-get install --only-upgrade meshd`
+(postinst рестартует демон, если уже есть `state.json`). **Если GitHub заблокирован**
+(актуально для РФ) — зеркало через jsDelivr CDN (хост
+`cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages` вместо `tumour.github.io/awg-mesh`):
+
+```bash
+sudo wget -qO /etc/apt/keyrings/awg-mesh.asc \
+  https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/debian/meshd-archive-keyring.asc
+echo "deb [signed-by=/etc/apt/keyrings/awg-mesh.asc] https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/debian stable main" \
+  | sudo tee /etc/apt/sources.list.d/awg-mesh.list
+sudo apt-get update
+```
+
+Репозиторий собирается и подписывается в release-CI (`deploy/debian/build-apt-repo.sh`),
+публикуется на GitHub Pages (ветка `gh-pages`, дерево `debian/`). Приватный ключ
+подписи — в repo-secret `APT_SIGN_KEY`, публичный лежит в репо
+(`deploy/debian/meshd-archive-keyring.asc`).
 
 ## Подключение apk-фида (OpenWrt 25.12+)
 

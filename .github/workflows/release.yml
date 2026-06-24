@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       feed: ${{ steps.prep.outputs.feed }}
+      apt: ${{ steps.prep-apt.outputs.apt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -118,12 +119,48 @@ jobs:
             APK_SIGN_KEY_FILE=/tmp/feedkeys/awg-mesh-apk.rsa \
             sh deploy/openwrt/build-feed.sh
           cp deploy/openwrt/awg-mesh-apk.rsa.pub public/openwrt/awg-mesh-apk.rsa.pub
-          # landing-страница в корне Pages (иначе корневой URL = 404)
-          cp deploy/openwrt/feed-index.html public/index.html
           rm -f /tmp/feedkeys/awg-mesh-apk.rsa
 
+      # --- Подписанный apt-репозиторий для Debian/Ubuntu ---
+      # Требует repo-secret APT_SIGN_KEY (приватный OpenPGP-ключ, ASCII-armored,
+      # парный к deploy/debian/meshd-archive-keyring.asc). Без секрета шаг тихо
+      # пропускается (репозиторий не публикуется).
+      - name: prepare apt signing key
+        id: prep-apt
+        env:
+          APT_SIGN_KEY: ${{ secrets.APT_SIGN_KEY }}
+        run: |
+          if [ -z "$APT_SIGN_KEY" ]; then
+            echo "APT_SIGN_KEY secret not set — skipping apt repo build"
+            echo "apt=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p /tmp/aptkeys
+          printf '%s' "$APT_SIGN_KEY" > /tmp/aptkeys/apt-sign.asc
+          chmod 600 /tmp/aptkeys/apt-sign.asc
+          echo "apt=1" >> "$GITHUB_OUTPUT"
+
+      - name: build signed apt repo
+        if: steps.prep-apt.outputs.apt == '1'
+        run: |
+          sudo apt-get update && sudo apt-get install -y apt-utils
+          # apt строг к формату версии — берём только цифры.точки (как у apk-фида).
+          VERSION=$(echo "${GITHUB_REF_NAME#v}" | grep -oE '^[0-9]+(\.[0-9]+)*')
+          OUT=public/debian VERSION="$VERSION" \
+            GPG_KEY_FILE=/tmp/aptkeys/apt-sign.asc DIST=dist \
+            sh deploy/debian/build-apt-repo.sh
+          rm -f /tmp/aptkeys/apt-sign.asc
+
+      # Landing-страница в корне Pages (иначе корневой URL = 404). Кладём, если
+      # собран хотя бы один репозиторий (apk-фид или apt).
+      - name: prepare Pages landing
+        if: steps.prep.outputs.feed == '1' || steps.prep-apt.outputs.apt == '1'
+        run: |
+          mkdir -p public
+          cp deploy/openwrt/feed-index.html public/index.html
+
       - name: upload Pages artifact
-        if: steps.prep.outputs.feed == '1'
+        if: steps.prep.outputs.feed == '1' || steps.prep-apt.outputs.apt == '1'
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
@@ -133,7 +170,7 @@ jobs:
   deploy-pages:
     name: deploy feed to GitHub Pages
     needs: release
-    if: needs.release.outputs.feed == '1'
+    if: needs.release.outputs.feed == '1' || needs.release.outputs.apt == '1'
     runs-on: ubuntu-latest
     permissions:
       pages: write

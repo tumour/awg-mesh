@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>awg-mesh — apk feed для OpenWrt</title>
+<title>awg-mesh — пакетные репозитории</title>
 <style>
   body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 720px;
          margin: 2rem auto; padding: 0 1rem; color: #1c1e21; }
@@ -15,12 +15,22 @@
 </style>
 </head>
 <body>
-<h1>awg-mesh — apk-фид для OpenWrt</h1>
-<p>Подписанный репозиторий пакета <code>meshd</code> (AmneziaWG mesh-сеть)
-для OpenWrt&nbsp;25.12+ (apk-tools&nbsp;v3). Установка и обновление —
-<code>apk add/upgrade meshd</code>.</p>
+<h1>awg-mesh — пакетные репозитории</h1>
+<p>Подписанные репозитории пакета <code>meshd</code> (AmneziaWG mesh-сеть):
+<strong>apt</strong> для Debian/Ubuntu и <strong>apk</strong> для OpenWrt&nbsp;25.12+.
+Установка и обновление — штатными <code>apt</code>/<code>apk</code>.</p>
 
-<h2>Подключение (на роутере)</h2>
+<h2>Debian / Ubuntu (apt)</h2>
+<pre>sudo install -d -m 0755 /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/awg-mesh.asc \
+  https://tumour.github.io/awg-mesh/debian/meshd-archive-keyring.asc
+echo "deb [signed-by=/etc/apt/keyrings/awg-mesh.asc] https://tumour.github.io/awg-mesh/debian stable main" \
+  | sudo tee /etc/apt/sources.list.d/awg-mesh.list
+sudo apt-get update &amp;&amp; sudo apt-get install meshd</pre>
+<p class="muted">Обновление потом — <code>sudo apt-get update &amp;&amp; sudo apt-get install --only-upgrade meshd</code>.
+Арки: amd64, arm64.</p>
+
+<h2>OpenWrt 25.12+ (apk)</h2>
 <pre>WRT_VER=$( . /etc/openwrt_release; echo "${DISTRIB_RELEASE%%-*}" | cut -d. -f1-2 )
 echo "https://tumour.github.io/awg-mesh/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
   &gt; /etc/apk/repositories.d/awg-mesh.list
@@ -29,14 +39,11 @@ wget https://tumour.github.io/awg-mesh/openwrt/awg-mesh-apk.rsa.pub \
 apk update &amp;&amp; apk add --latest meshd</pre>
 
 <h2>Если GitHub заблокирован (зеркало jsDelivr)</h2>
-<pre>WRT_VER=$( . /etc/openwrt_release; echo "${DISTRIB_RELEASE%%-*}" | cut -d. -f1-2 )
-echo "https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/${WRT_VER}/$(cat /etc/apk/arch)/packages.adb" \
-  &gt; /etc/apk/repositories.d/awg-mesh.list
-wget https://cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages/openwrt/awg-mesh-apk.rsa.pub \
-  -O /etc/apk/keys/awg-mesh-apk.rsa.pub
-apk update</pre>
+<p class="muted">Замените в командах выше хост
+<code>tumour.github.io/awg-mesh</code> на
+<code>cdn.jsdelivr.net/gh/tumour/awg-mesh@gh-pages</code>.</p>
 
-<p class="muted">Подробности и установка на других системах —
+<p class="muted">Подробности и установка из <code>.deb</code>/<code>.apk</code> вручную —
 <a href="https://github.com/tumour/awg-mesh">github.com/tumour/awg-mesh</a>.</p>
 </body>
 </html>

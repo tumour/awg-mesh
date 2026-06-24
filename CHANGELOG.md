@@ -3,6 +3,20 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.4.3] — 2026-06-24
+
+Подписанный apt-репозиторий для Debian/Ubuntu. Бинарь `meshd` без изменений
+относительно 0.4.2 — релиз добавляет канал установки/обновления.
+
+### Added
+- **apt-репозиторий (Debian/Ubuntu)** — `meshd` ставится и обновляется как
+  системный пакет (`apt-get install meshd`); доверие по OpenPGP-подписи
+  репозитория (`signed-by`, suite `stable`, арки amd64/arm64). Сборка и подпись
+  в release-CI (`deploy/debian/build-apt-repo.sh`), публикация на GitHub Pages
+  (дерево `debian/`) рядом с apk-фидом OpenWrt. Приватный ключ подписи — repo-
+  secret `APT_SIGN_KEY`, публичный закоммичен (`deploy/debian/meshd-archive-keyring.asc`).
+  Подключение — секция README «Подключение apt-репозитория».
+
 ## [0.4.2] — 2026-06-24
 
 Багфиксы control plane по итогам ревью 0.4.1 + закрытие тех-долга.
@@ -185,6 +199,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.4.3]: https://github.com/tumour/awg-mesh/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/tumour/awg-mesh/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/tumour/awg-mesh/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/tumour/awg-mesh/compare/v0.3.0...v0.4.0
