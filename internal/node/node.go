@@ -33,6 +33,7 @@ import (
 // реального TUN/root.
 type Device interface {
 	Configure(priv wgkey.Private, awgp awgparams.Params, localObf awgparams.LocalObf, peers []state.Peer, selfPubKey wgkey.Public) error
+	ApplyParams(awgp awgparams.Params) error
 	UpdatePeer(p state.Peer) error
 	Up() error
 	Name() string
@@ -45,6 +46,10 @@ type Options struct {
 	Interface      string
 	Verbose        bool
 	GossipInterval time.Duration
+	// FlipInterval — как часто проверять, не пора ли применить запланированную
+	// flag-day-смену params (0 → дефолт). Применение синхронно во всех нодах по
+	// Pending.ApplyAt, поэтому интервал должен быть заметно меньше grace.
+	FlipInterval time.Duration
 	// Logger (опц., nil → slog.Default()) — инъектируемый структурный логгер.
 	// Демон не пишет в глобальный log: embeddable из вебморды/LuCI со своим sink'ом.
 	Logger *slog.Logger
@@ -74,6 +79,10 @@ func Run(ctx context.Context, opts Options) error {
 	linker := opts.Linker
 	if linker == nil {
 		linker = wg.DefaultLinker()
+	}
+	flipInterval := opts.FlipInterval
+	if flipInterval == 0 {
+		flipInterval = 10 * time.Second
 	}
 
 	store := state.NewStore(opts.StateFile)
@@ -188,6 +197,17 @@ func Run(ctx context.Context, opts Options) error {
 		go gc.Run(ctx)
 	}
 
+	// flag-day-смена params: применяем Pending в назначенный ApplyAt (синхронно
+	// со всей сетью). reconfigure на лету, без пересоздания awg0.
+	go runParamFlip(ctx, store, device, flipInterval, logger)
+
+	// seed назначает ApplyAt анонсированному Pending только когда ВСЕ ноды
+	// подтвердили его приём (ack-then-commit) — иначе flip не стартует и сеть
+	// остаётся на старом наборе целиком (ни одну ноду не теряем).
+	if s.IsSeed {
+		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, logger)
+	}
+
 	logger.Info("ready, waiting for signals")
 	<-ctx.Done()
 	logger.Info("received signal, shutting down")
@@ -216,6 +236,97 @@ func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public, logger *slo
 		if err := dev.UpdatePeer(p); err != nil {
 			logger.Warn("push-peers: update peer failed", "peer", p.Label, "err", err)
 		}
+	}
+}
+
+// runParamFlip периодически применяет запланированную flag-day-смену params,
+// когда наступает её ApplyAt. Завершается по ctx.
+func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval time.Duration, logger *slog.Logger) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			applyDueParams(store, dev, logger)
+		}
+	}
+}
+
+// applyDueParams применяет Pending, если наступил его ApplyAt: фиксирует новый
+// набор в state (под Store.Update, RMW-safe) и reconfigure'ит device на лету.
+// Решение «пора ли» — доменное (mesh.PendingDue); здесь только применение.
+// Идемпотентно: не пора / нет Pending → ErrNoChange (диск не трогаем).
+func applyDueParams(store *state.Store, dev Device, logger *slog.Logger) {
+	var applied awgparams.Params
+	var version uint64
+	var did bool // выставляется в fn только при реальном применении (Update гасит ErrNoChange в nil)
+	if _, err := store.Update(func(s *state.State) error {
+		if !mesh.PendingDue(s.Pending, time.Now().UTC()) {
+			return state.ErrNoChange
+		}
+		applied, version, did = s.Pending.Params, s.Pending.Version, true
+		s.AwgParams = applied
+		s.ParamsVersion = version
+		s.Pending = nil
+		return nil
+	}); err != nil {
+		logger.Error("flip: persist params failed", "err", err)
+		return
+	}
+	if !did {
+		return // не пора / нет Pending
+	}
+	if err := dev.ApplyParams(applied); err != nil {
+		// Слой откат/watchdog — отдельно; пока фиксируем. Связь восстановят
+		// рехендшейки, если остальные ноды применили тот же набор синхронно.
+		logger.Error("flip: apply params to device failed", "version", version, "err", err)
+		return
+	}
+	logger.Info("flag-day params applied", "version", version)
+}
+
+// commitGrace — фора между назначением ApplyAt (когда все ноды подтвердили
+// приём Pending) и самим flip: чтобы commit (ApplyAt) успел разойтись по gossip
+// до момента применения. Короткая — все уже знают сам Pending, осталось ApplyAt.
+const commitGrace = 30 * time.Second
+
+// runParamCommit (seed-only) назначает ApplyAt анонсированному Pending, когда
+// ВСЕ ноды подтвердили его приём. Завершается по ctx.
+func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Acks() map[string]uint64 }, selfPub string, interval time.Duration, logger *slog.Logger) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			commitIfAllAcked(store, acks.Acks(), selfPub, logger)
+		}
+	}
+}
+
+// commitIfAllAcked назначает ApplyAt, если есть анонсированный Pending и все
+// пиры подтвердили его приём (домен mesh.AllPeersAcked/CommitPending). Идемпотентно.
+func commitIfAllAcked(store *state.Store, acks map[string]uint64, selfPub string, logger *slog.Logger) {
+	var committed *state.PendingParams
+	if _, err := store.Update(func(s *state.State) error {
+		if s.Pending == nil || !s.Pending.ApplyAt.IsZero() {
+			return state.ErrNoChange // нет анонса / уже закоммичен
+		}
+		if !mesh.AllPeersAcked(s.Peers, selfPub, acks, s.Pending.Version) {
+			return state.ErrNoChange // не все подтвердили — ждём
+		}
+		mesh.CommitPending(s.Pending, time.Now().UTC(), commitGrace)
+		committed = s.Pending
+		return nil
+	}); err != nil {
+		logger.Error("commit: persist failed", "err", err)
+		return
+	}
+	if committed != nil {
+		logger.Info("flag-day committed (all nodes acked)", "version", committed.Version, "apply_at", committed.ApplyAt)
 	}
 }
 

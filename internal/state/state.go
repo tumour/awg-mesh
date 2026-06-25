@@ -47,6 +47,13 @@ type State struct {
 	LocalObf      awgparams.LocalObf `json:"local_obf"`      // ПО-НОДНЫЕ I1-I5, НЕ раздаются
 	NetworkCIDR   string             `json:"network_cidr"`   // например "100.64.0.0/24"
 
+	// Версионирование сетевых params для flag-day-смены (S3/S4/H на лету).
+	// ParamsVersion монотонно растёт при каждой смене; раздаётся через gossip,
+	// нода принимает строго более новый Pending и применяет его в ApplyAt
+	// одновременно со всеми (см. internal/mesh paramsync.go).
+	ParamsVersion uint64         `json:"params_version"`           // 0 = исходные с init/join
+	Pending       *PendingParams `json:"pending_params,omitempty"` // запланированный flip, nil = нет
+
 	// Наша node identity
 	PrivateKey string `json:"private_key"` // base64 WG-encoded (32 байта)
 	PublicKey  string `json:"public_key"`  // base64 WG-encoded
@@ -61,6 +68,17 @@ type State struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PendingParams — запланированная синхронная смена СЕТЕВЫХ AwgParams (flag-day).
+// Раздаётся через gossip по ещё живым (старым) туннелям, все ноды сохраняют её
+// не применяя, и переключаются ОДНОВРЕМЕННО в ApplyAt — так окно рассинхрона
+// сжимается до разброса часов, а не «пока дойдёт до каждого». Доменные решения
+// (принять/применить) — в internal/mesh, тут только данные.
+type PendingParams struct {
+	Params  awgparams.Params `json:"params"`
+	Version uint64           `json:"version"`  // строго > State.ParamsVersion
+	ApplyAt time.Time        `json:"apply_at"` // UTC, момент синхронного применения
 }
 
 // Peer — другая нода в mesh-сети, известная нам.

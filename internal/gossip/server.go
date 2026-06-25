@@ -19,6 +19,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/proto"
@@ -43,13 +45,24 @@ type Server struct {
 	addr  string
 	srv   *http.Server
 	log   *slog.Logger
+
+	// acks — последняя версия params, о которой отрепортил каждый пир (по pubkey)
+	// в gossip-запросе (?node=&v=). Seed по ним решает, все ли получили Pending
+	// (mesh.AllPeersAcked) перед назначением ApplyAt. В памяти: ack'и эфемерны.
+	mu   sync.Mutex
+	acks map[string]uint64
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO
-// proto.PeerInfo (тот же, что в bootstrap-HelloResponse).
+// proto.PeerInfo (тот же, что в bootstrap-HelloResponse). ParamsVersion+Pending
+// раздают запланированную flag-day-смену сетевых params: получатель принимает
+// строго более новый Pending (mesh.ShouldAdoptPending) и применит его синхронно
+// в ApplyAt. PendingParams сериализуется как есть (domain-тип, JSON-готов).
 type PeersResponse struct {
-	Peers     []proto.PeerInfo `json:"peers"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	Peers         []proto.PeerInfo     `json:"peers"`
+	UpdatedAt     time.Time            `json:"updated_at"`
+	ParamsVersion uint64               `json:"params_version"`
+	Pending       *state.PendingParams `json:"pending_params,omitempty"`
 }
 
 // NewServer создаёт сервер на mesh-IP:port. host обычно = state.NodeIP.
@@ -59,7 +72,31 @@ func NewServer(host string, port int, store *state.Store, logger *slog.Logger) *
 		logger = slog.Default()
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	return &Server{store: store, addr: addr, log: logger.With("component", "gossip")}
+	return &Server{store: store, addr: addr, log: logger.With("component", "gossip"), acks: map[string]uint64{}}
+}
+
+// recordAck монотонно запоминает версию, о которой сообщил пир (gossip-запрос).
+func (s *Server) recordAck(pubkey string, version uint64) {
+	if pubkey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if version > s.acks[pubkey] {
+		s.acks[pubkey] = version
+	}
+}
+
+// Acks возвращает копию собранных ack'ов (pubkey → версия). Snapshot под локом,
+// чтобы seed-commit-loop читал без гонки. Пустая мапа, если репортов ещё не было.
+func (s *Server) Acks() map[string]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]uint64, len(s.acks))
+	for k, v := range s.acks {
+		out[k] = v
+	}
+	return out
 }
 
 // Start запускает сервер. Останавливается при отмене ctx.
@@ -96,6 +133,13 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// ack: «пир node в курсе версий params до v». Trust-by-tunneling — внутри
+	// туннеля источник уже прошёл cluster-secret-проверку.
+	if node := r.URL.Query().Get("node"); node != "" {
+		if v, err := strconv.ParseUint(r.URL.Query().Get("v"), 10, 64); err == nil {
+			s.recordAck(node, v)
+		}
+	}
 	st, err := s.store.Read()
 	if err != nil {
 		s.log.Error("load state failed", "err", err)
@@ -104,8 +148,10 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := PeersResponse{
-		Peers:     proto.PeerInfosFromState(st.Peers),
-		UpdatedAt: st.UpdatedAt,
+		Peers:         proto.PeerInfosFromState(st.Peers),
+		UpdatedAt:     st.UpdatedAt,
+		ParamsVersion: st.ParamsVersion,
+		Pending:       st.Pending,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

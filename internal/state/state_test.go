@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
 )
@@ -26,6 +27,20 @@ func TestSaveLoadV2RoundTrip(t *testing.T) {
 		NetworkCIDR: "100.64.0.0/24",
 		NodeIP:      "100.64.0.4",
 		IsSeed:      false,
+		// flag-day: версия + Pending (с вложенными Params/HeaderRange) обязаны
+		// пережить сериализацию — иначе gossip раздаст нечитаемое.
+		ParamsVersion: 5,
+		Pending: &PendingParams{
+			Version: 6,
+			ApplyAt: time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC),
+			Params: awgparams.Params{
+				Jc: 4, Jmin: 50, Jmax: 200, S1: 30, S2: 41, S3: 30, S4: 20,
+				H1: awgparams.HeaderRange{Min: 11, Max: 22},
+				H2: awgparams.HeaderRange{Min: 33, Max: 44},
+				H3: awgparams.HeaderRange{Min: 55, Max: 66},
+				H4: awgparams.HeaderRange{Min: 77, Max: 88},
+			},
+		},
 	}
 	if err := in.Save(path); err != nil {
 		t.Fatalf("save: %v", err)
@@ -42,6 +57,16 @@ func TestSaveLoadV2RoundTrip(t *testing.T) {
 	}
 	if out.LocalObf != in.LocalObf {
 		t.Errorf("LocalObf mismatch: got %+v want %+v", out.LocalObf, in.LocalObf)
+	}
+	if out.ParamsVersion != 5 {
+		t.Errorf("ParamsVersion = %d, want 5", out.ParamsVersion)
+	}
+	if out.Pending == nil {
+		t.Fatal("Pending потерян при round-trip")
+	}
+	if out.Pending.Version != in.Pending.Version || !out.Pending.ApplyAt.Equal(in.Pending.ApplyAt) ||
+		out.Pending.Params != in.Pending.Params {
+		t.Errorf("Pending mismatch:\n got %+v\nwant %+v", out.Pending, in.Pending)
 	}
 }
 

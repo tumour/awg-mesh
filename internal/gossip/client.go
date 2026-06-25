@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/mesh"
@@ -85,7 +87,14 @@ func (c *Client) doRound(ctx context.Context) {
 		return
 	}
 
-	resp, err := c.fetchPeers(ctx, target.NodeIP)
+	// ack: сообщаем цели, до какой версии params мы в курсе (применённая или
+	// принятый Pending) — seed по этим репортам решает, все ли получили Pending.
+	acked := st.ParamsVersion
+	if st.Pending != nil && st.Pending.Version > acked {
+		acked = st.Pending.Version
+	}
+
+	resp, err := c.fetchPeers(ctx, target.NodeIP, acked)
 	if err != nil {
 		c.log.Warn("fetch peers failed", "peer", target.Label, "mesh_ip", target.NodeIP, "err", err)
 		return
@@ -99,14 +108,23 @@ func (c *Client) doRound(ctx context.Context) {
 
 	var changed []state.Peer
 	var rejected []string
+	var adoptedPending *state.PendingParams
 	if _, err := c.store.Update(func(s *state.State) error {
 		merged, ch, rej, persist := mesh.MergePeers(s.Peers, remote, c.selfPub, s.NetworkCIDR)
 		rejected = rej
 		changed = ch
+		// Принять запланированную смену params, если она строго новее нашей
+		// (домен решает монотонность). Trust-by-tunneling: внутри wg-туннеля
+		// источник уже прошёл cluster-secret-проверку.
+		if mesh.ShouldAdoptPending(s.ParamsVersion, s.Pending, resp.Pending) {
+			s.Pending = resp.Pending
+			adoptedPending = resp.Pending
+		}
 		// Пишем файл по persist (значимое изменение для диска), НЕ по changed
 		// (что пушить в device): label/IsSeed-обновления значимы для state, но в
-		// changed не попадают — без этого они бы молча терялись.
-		if !persist {
+		// changed не попадают — без этого они бы молча терялись. Принятый Pending —
+		// тоже значимое изменение для диска.
+		if !persist && adoptedPending == nil {
 			return state.ErrNoChange // только LastSeen-refresh — файл не трогаем
 		}
 		s.Peers = merged
@@ -114,6 +132,10 @@ func (c *Client) doRound(ctx context.Context) {
 	}); err != nil {
 		c.log.Warn("merge/save state failed", "err", err)
 		return
+	}
+	if adoptedPending != nil {
+		c.log.Info("pending params adopted", "version", adoptedPending.Version,
+			"apply_at", adoptedPending.ApplyAt, "from", target.Label)
 	}
 	// Отказы — потенциальные попытки угона mesh-IP/маршрута соседом; видно оператору.
 	for _, r := range rejected {
@@ -131,9 +153,10 @@ func (c *Client) doRound(ctx context.Context) {
 
 // fetchPeers — HTTP GET /v1/peers через wg-туннель. ctx прокидывается, чтобы
 // летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута.
-func (c *Client) fetchPeers(ctx context.Context, meshIP string) (*PeersResponse, error) {
-	url := fmt.Sprintf("http://%s:%d/v1/peers", meshIP, c.port)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (c *Client) fetchPeers(ctx context.Context, meshIP string, ackVersion uint64) (*PeersResponse, error) {
+	q := url.Values{"node": {c.selfPub}, "v": {strconv.FormatUint(ackVersion, 10)}}
+	reqURL := fmt.Sprintf("http://%s:%d/v1/peers?%s", meshIP, c.port, q.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}

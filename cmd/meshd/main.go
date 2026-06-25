@@ -42,6 +42,8 @@ func main() {
 		err = cmdStatus(args)
 	case "token":
 		err = cmdToken(args)
+	case "set-params":
+		err = cmdSetParams(args)
 	case "self-upgrade":
 		err = cmdSelfUpgrade(args)
 	case "__watchdog":
@@ -72,6 +74,7 @@ Commands:
   serve         Run only bootstrap-listener (without wg-device; for debug/testing)
   status        Print current state and peer info
   token         Re-print the join-token from existing state (for onboarding nodes)
+  set-params    (seed) Schedule a network-wide AWG-2.0 params flag-day (S3/S4/H ranges)
   self-upgrade  Replace the binary with a new one, auto-rollback on lost mesh connectivity
   version       Print version
 

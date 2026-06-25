@@ -40,3 +40,24 @@ func TestAwg2ConfigAcceptedByDevice(t *testing.T) {
 		dev.Close()
 	}
 }
+
+// TestApplyParamsAcceptedByDevice — flag-day reconfigure СЕТЕВЫХ params на лету
+// (ApplyParams) принимается реальным amneziawg-go без пересоздания интерфейса.
+// Гоняем смену набора (старт → flip) 50 раз: Generate() рандомизирован.
+func TestApplyParamsAcceptedByDevice(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		tdev := tuntest.NewChannelTUN()
+		dev := &Device{dev: device.NewDevice(tdev.TUN(), conn.NewDefaultBind(),
+			device.NewLogger(device.LogLevelSilent, "test: "))}
+
+		start, _ := awgparams.Generate()
+		flip, _ := awgparams.Generate()
+		errStart := dev.ApplyParams(start) // как при старте
+		errFlip := dev.ApplyParams(flip)   // flag-day flip на лету
+		dev.dev.Close()
+
+		if errStart != nil || errFlip != nil {
+			t.Fatalf("ApplyParams rejected: start=%v flip=%v", errStart, errFlip)
+		}
+	}
+}

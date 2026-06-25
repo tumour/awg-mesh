@@ -3,6 +3,35 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [Unreleased]
+
+Flag-day-смена сетевых AWG-params (S3/S4/H-диапазоны) на ЖИВОЙ сети — без
+ре-init/ре-join и без потери нод. Раньше S/H фиксировались при init и сменить
+их на работающей mesh было нельзя (только пересоздание сети).
+
+### Added
+- **`meshd set-params` (seed)** — анонсирует flag-day-смену сетевых params:
+  генерит свежий 2.0-набор (непересекающиеся H-диапазоны + S3/S4), кладёт в
+  `Pending` и раздаёт по gossip. Применяется не сразу — см. ack-then-commit.
+- **Распределённый flip по модели «announce → ack → commit → apply»** (домен
+  `internal/mesh/paramsync.go`, чистые функции):
+  - announce: seed кладёт `Pending` (версия+params, БЕЗ `ApplyAt`), раздаёт по
+    gossip по ещё живым туннелям; ноды принимают строго более новый (монотонно).
+  - ack: при gossip-pull нода сообщает seed свою версию (`?node=&v=`).
+  - commit: seed назначает `ApplyAt` ТОЛЬКО когда ВСЕ ноды подтвердили приём
+    (`AllPeersAcked`) — пока хоть одна молчит, flip не стартует и сеть остаётся
+    на старом наборе целиком (**гарантия: ни одну ноду не теряем**).
+  - apply: все (включая seed) переключаются синхронно в `ApplyAt` через
+    `device.ApplyParams` (reconfigure S/H на лету, без пересоздания awg0).
+- `state`: `ParamsVersion` + `Pending` (params/version/apply_at), раздаются gossip.
+
+### Note
+- Согласованный откат после flip намеренно НЕ реализован: в hub-spoke его не
+  раздать (туннели рвутся сменой params) — основной риск закрыт ack-then-commit
+  (flip не происходит, пока не подтвердили все). Окно рассинхрона — разброс часов
+  вокруг `ApplyAt` (минимизируется NTP), как и предписывает природа interface-level
+  params в AWG (zero-downtime для S/H невозможен).
+
 ## [0.5.0] — 2026-06-25
 
 AmneziaWG-2.0 обфускация — против stateful-DPI, который душит поток после

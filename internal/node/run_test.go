@@ -17,16 +17,22 @@ import (
 // fakeDevice — node.Device без реального TUN.
 type fakeDevice struct {
 	name       string
-	configured bool
-	upped      bool
-	closed     bool
+	configured     bool
+	appliedParams  bool
+	applyParamsErr error // инъекция: ошибка из ApplyParams (для error-ветки flip)
+	upped          bool
+	closed         bool
 }
 
 func (f *fakeDevice) Configure(wgkey.Private, awgparams.Params, awgparams.LocalObf, []state.Peer, wgkey.Public) error {
 	f.configured = true
 	return nil
 }
-func (f *fakeDevice) UpdatePeer(state.Peer) error { return nil }
+func (f *fakeDevice) ApplyParams(awgparams.Params) error {
+	f.appliedParams = true
+	return f.applyParamsErr
+}
+func (f *fakeDevice) UpdatePeer(state.Peer) error        { return nil }
 func (f *fakeDevice) Up() error                   { f.upped = true; return nil }
 func (f *fakeDevice) Name() string                { return f.name }
 func (f *fakeDevice) Close()                      { f.closed = true }

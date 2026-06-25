@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
 )
@@ -197,6 +198,179 @@ func TestHandlePeersReturnsState(t *testing.T) {
 	if len(resp.Peers) != 1 || resp.Peers[0].PublicKey != "akey" {
 		t.Fatalf("peers: %+v", resp.Peers)
 	}
+}
+
+// doRound при pull сообщает цели свой ack: node=selfPub и v=max(ParamsVersion,
+// Pending.Version) — это вход для seed-commit. Без корректного ack flip не
+// закоммитится никогда, поэтому путь обязателен к проверке.
+func TestDoRoundSendsAck(t *testing.T) {
+	var gotNode, gotV string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotNode = r.URL.Query().Get("node")
+		gotV = r.URL.Query().Get("v")
+		_ = json.NewEncoder(w).Encode(PeersResponse{})
+	}))
+	defer ts.Close()
+	host, p, _ := net.SplitHostPort(ts.Listener.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: "SELFPUB", NodeIP: "100.64.0.1",
+		ParamsVersion: 4,
+		Pending:       &state.PendingParams{Version: 7}, // acked = max(4,7) = 7
+		Peers:         []state.Peer{{Label: "t", PublicKey: "tk", NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+	})
+	c := NewClient(store, "SELFPUB", time.Minute, port, nil, discardLogger())
+
+	c.doRound(context.Background())
+
+	if gotNode != "SELFPUB" {
+		t.Errorf("ack node = %q, want SELFPUB", gotNode)
+	}
+	if gotV != "7" {
+		t.Errorf("ack v = %q, want 7 (max of paramsVersion=4, pending=7)", gotV)
+	}
+}
+
+// doRound устойчив к сбойному ответу цели (5xx / битый JSON): не паникует, state
+// не меняет. Реальный кейс — сосед в плохом состоянии.
+func TestDoRoundHandlesBadResponse(t *testing.T) {
+	cases := map[string]http.HandlerFunc{
+		"5xx":      func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) },
+		"битый JSON": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("{not json")) },
+	}
+	for name, h := range cases {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(h)
+			defer ts.Close()
+			host, p, _ := net.SplitHostPort(ts.Listener.Addr().String())
+			port, _ := strconv.Atoi(p)
+
+			store := saveState(t, &state.State{
+				NetworkCIDR: "100.64.0.0/24", PublicKey: "self", NodeIP: "100.64.0.1", ParamsVersion: 2,
+				Peers: []state.Peer{{Label: "t", PublicKey: "tk", NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+			})
+			c := NewClient(store, "self", time.Minute, port, nil, discardLogger())
+
+			c.doRound(context.Background()) // не должен паниковать
+
+			s, _ := store.Read()
+			if s.ParamsVersion != 2 || s.Pending != nil {
+				t.Errorf("state не должен меняться от битого ответа: %+v", s)
+			}
+		})
+	}
+}
+
+// fakeServerWithPending — узел, отдающий peers + версию params + Pending.
+func fakeServerWithPending(t *testing.T, peers []proto.PeerInfo, version uint64, pend *state.PendingParams) (string, int, *httptest.Server) {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(PeersResponse{Peers: peers, ParamsVersion: version, Pending: pend})
+	}))
+	h, p, err := net.SplitHostPort(ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	pn, _ := strconv.Atoi(p)
+	return h, pn, ts
+}
+
+// handlePeers раздаёт версию params и Pending (для flag-day-смены).
+func TestHandlePeersReturnsPending(t *testing.T) {
+	pend := &state.PendingParams{Version: 7, ApplyAt: time.Now().Add(time.Minute).UTC(),
+		Params: awgparams.Params{S4: 16}}
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: "selfkey", NodeIP: "100.64.0.1",
+		ParamsVersion: 6, Pending: pend,
+	})
+	srv := NewServer("100.64.0.1", DefaultPort, store, discardLogger())
+
+	rec := httptest.NewRecorder()
+	srv.handlePeers(rec, httptest.NewRequest(http.MethodGet, "/v1/peers", nil))
+
+	var resp PeersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ParamsVersion != 6 || resp.Pending == nil || resp.Pending.Version != 7 ||
+		resp.Pending.Params.S4 != 16 {
+		t.Fatalf("pending not served: version=%d pending=%+v", resp.ParamsVersion, resp.Pending)
+	}
+}
+
+// doRound принимает СТРОГО более новый Pending от цели (раздача flag-day).
+func TestDoRoundAdoptsNewerPending(t *testing.T) {
+	const self, targetKey = "selfkey", "targetkey"
+	pend := &state.PendingParams{Version: 5, ApplyAt: time.Now().Add(time.Minute).UTC(),
+		Params: awgparams.Params{S4: 16}}
+	host, port, ts := fakeServerWithPending(t,
+		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
+		5, pend)
+	defer ts.Close()
+
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
+		ParamsVersion: 4, // pend.Version=5 строго новее → принимаем
+		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+	})
+	c := NewClient(store, self, time.Minute, port, nil, discardLogger())
+
+	c.doRound(context.Background())
+
+	got, _ := store.Read()
+	if got.Pending == nil || got.Pending.Version != 5 || got.Pending.Params.S4 != 16 {
+		t.Fatalf("newer pending not adopted: %+v", got.Pending)
+	}
+}
+
+// doRound ИГНОРИРУЕТ устаревший Pending (версия не новее уже применённой).
+func TestDoRoundIgnoresStalePending(t *testing.T) {
+	const self, targetKey = "selfkey", "targetkey"
+	stale := &state.PendingParams{Version: 3, ApplyAt: time.Now().Add(time.Minute).UTC()}
+	host, port, ts := fakeServerWithPending(t,
+		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
+		3, stale)
+	defer ts.Close()
+
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
+		ParamsVersion: 5, // уже новее, чем pend.Version=3 → не принимаем
+		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+	})
+	c := NewClient(store, self, time.Minute, port, nil, discardLogger())
+
+	c.doRound(context.Background())
+
+	got, _ := store.Read()
+	if got.Pending != nil {
+		t.Fatalf("stale pending must be ignored, got %+v", got.Pending)
+	}
+}
+
+// handlePeers записывает ack из query (?node=&v=) монотонно — seed по ним решает,
+// все ли получили Pending.
+func TestHandlePeersRecordsAck(t *testing.T) {
+	store := saveState(t, &state.State{NetworkCIDR: "100.64.0.0/24", PublicKey: "selfkey", NodeIP: "100.64.0.1"})
+	srv := NewServer("100.64.0.1", DefaultPort, store, discardLogger())
+
+	get := func(q string) {
+		rec := httptest.NewRecorder()
+		srv.handlePeers(rec, httptest.NewRequest(http.MethodGet, "/v1/peers?"+q, nil))
+	}
+	get("node=peerX&v=5")
+	if srv.Acks()["peerX"] != 5 {
+		t.Fatalf("ack не записан: %v", srv.Acks())
+	}
+	get("node=peerX&v=3") // меньшая версия не откатывает
+	if srv.Acks()["peerX"] != 5 {
+		t.Errorf("ack откатился назад: %v", srv.Acks())
+	}
+	get("node=peerX&v=7") // большая — обновляет
+	if srv.Acks()["peerX"] != 7 {
+		t.Errorf("ack не вырос до 7: %v", srv.Acks())
+	}
+	get("") // без node — игнор, без паники
 }
 
 // handlePeers отвечает 405 на не-GET (gossip read-only).

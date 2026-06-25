@@ -163,11 +163,18 @@ func (d *Device) Close() {
 	}
 }
 
-// writeAwgParams сериализует AmneziaWG-параметры в UAPI-формат.
-// H1-H4 — диапазоны "min-max" (amneziawg-go newMagicHeader; min==max → фикс.
-// значение). S3/S4 (AWG-2.0) шлём всегда: lib трактует 0 как «padding выключен».
-// I1-I5 — только непустые (per-node CPS-пакеты).
+// writeAwgParams сериализует AmneziaWG-параметры в UAPI-формат: сетевые (S/H/J)
+// + per-node CPS-пакеты (I1-I5). Используется при полном Configure.
 func writeAwgParams(sb *strings.Builder, p awgparams.Params, lo awgparams.LocalObf) {
+	writeNetParams(sb, p)
+	writeLocalObf(sb, lo)
+}
+
+// writeNetParams — СЕТЕВЫЕ params (одинаковы на всех нодах). H1-H4 как "min-max"
+// (amneziawg-go newMagicHeader; min==max → фикс. значение). S3/S4 шлём всегда:
+// lib трактует 0 как «padding выключен». Этим же набором делается reconfigure
+// на лету при flag-day-смене (ApplyParams) — без replace_peers/private_key.
+func writeNetParams(sb *strings.Builder, p awgparams.Params) {
 	fmt.Fprintf(sb, "jc=%d\n", p.Jc)
 	fmt.Fprintf(sb, "jmin=%d\n", p.Jmin)
 	fmt.Fprintf(sb, "jmax=%d\n", p.Jmax)
@@ -179,11 +186,28 @@ func writeAwgParams(sb *strings.Builder, p awgparams.Params, lo awgparams.LocalO
 	writeHeader(sb, "h2", p.H2)
 	writeHeader(sb, "h3", p.H3)
 	writeHeader(sb, "h4", p.H4)
+}
+
+// writeLocalObf — per-node CPS-пакеты I1-I5 (только непустые).
+func writeLocalObf(sb *strings.Builder, lo awgparams.LocalObf) {
 	for i, spec := range [5]string{lo.I1, lo.I2, lo.I3, lo.I4, lo.I5} {
 		if spec != "" {
 			fmt.Fprintf(sb, "i%d=%s\n", i+1, spec)
 		}
 	}
+}
+
+// ApplyParams применяет СЕТЕВЫЕ params к уже поднятому awg0 на лету (flag-day
+// flip) — через UAPI, без replace_peers и пересоздания интерфейса. Туннели
+// рехендшейкаются на новых S/H, но IP/маршруты/пиры сохраняются. Ошибка IpcSet
+// (кривые params) → caller оставляет прежний набор.
+func (d *Device) ApplyParams(p awgparams.Params) error {
+	var sb strings.Builder
+	writeNetParams(&sb, p)
+	if err := d.dev.IpcSet(sb.String()); err != nil {
+		return fmt.Errorf("IpcSet net-params: %w", err)
+	}
+	return nil
 }
 
 // writeHeader — magic-header в формате "key=min-max".
