@@ -19,21 +19,24 @@ func TestGenerateS1S2NeverCollide(t *testing.T) {
 	}
 }
 
-func TestValidHeaders(t *testing.T) {
+func TestValidHeaderRanges(t *testing.T) {
+	r := func(min, max uint32) HeaderRange { return HeaderRange{Min: min, Max: max} }
 	cases := []struct {
 		name string
-		hs   [4]uint32
+		hs   [4]HeaderRange
 		want bool
 	}{
-		{"all distinct and >4", [4]uint32{5, 6, 7, 8}, true},
-		{"contains reserved 4", [4]uint32{4, 6, 7, 8}, false},
-		{"contains reserved 0", [4]uint32{0, 6, 7, 8}, false},
-		{"duplicate", [4]uint32{5, 5, 7, 8}, false},
-		{"large distinct", [4]uint32{100, 200, 300, 400}, true},
+		{"distinct non-overlapping", [4]HeaderRange{r(5, 10), r(20, 30), r(40, 50), r(60, 70)}, true},
+		{"single-value degenerate (v1-migrated)", [4]HeaderRange{r(5, 5), r(6, 6), r(7, 7), r(8, 8)}, true},
+		{"contains reserved <=4", [4]HeaderRange{r(4, 10), r(20, 30), r(40, 50), r(60, 70)}, false},
+		{"overlapping ranges", [4]HeaderRange{r(5, 25), r(20, 30), r(40, 50), r(60, 70)}, false},
+		{"touching boundaries overlap", [4]HeaderRange{r(5, 20), r(20, 30), r(40, 50), r(60, 70)}, false},
+		{"min>max", [4]HeaderRange{r(30, 20), r(40, 50), r(60, 70), r(80, 90)}, false},
+		{"max beyond safe-half", [4]HeaderRange{r(5, 10), r(20, 30), r(40, 50), {Min: 60, Max: 1 << 31}}, false},
 	}
 	for _, c := range cases {
-		if got := validHeaders(c.hs); got != c.want {
-			t.Errorf("%s: validHeaders(%v) = %v, want %v", c.name, c.hs, got, c.want)
+		if got := validHeaderRanges(c.hs); got != c.want {
+			t.Errorf("%s: validHeaderRanges(%v) = %v, want %v", c.name, c.hs, got, c.want)
 		}
 	}
 }
@@ -47,11 +50,11 @@ func TestGenerateWithinRecommendedRanges(t *testing.T) {
 		if p.Jc < 4 || p.Jc > 12 {
 			t.Fatalf("Jc out of range [4,12]: %d", p.Jc)
 		}
-		if p.Jmin < 8 || p.Jmin > 50 {
-			t.Fatalf("Jmin out of range [8,50]: %d", p.Jmin)
+		if p.Jmin < 40 || p.Jmin > 80 {
+			t.Fatalf("Jmin out of range [40,80]: %d", p.Jmin)
 		}
-		if p.Jmax <= p.Jmin || p.Jmax > 200 {
-			t.Fatalf("Jmax must be in (Jmin,200]: jmin=%d jmax=%d", p.Jmin, p.Jmax)
+		if p.Jmax <= p.Jmin || p.Jmax > p.Jmin+250 {
+			t.Fatalf("Jmax must be in (Jmin,Jmin+250]: jmin=%d jmax=%d", p.Jmin, p.Jmax)
 		}
 		if p.S1 < 15 || p.S1 > 150 {
 			t.Fatalf("S1 out of range [15,150]: %d", p.S1)
@@ -59,13 +62,32 @@ func TestGenerateWithinRecommendedRanges(t *testing.T) {
 		if p.S2 < 15 || p.S2 > 150 {
 			t.Fatalf("S2 out of range [15,150]: %d", p.S2)
 		}
-		hs := [4]uint32{p.H1, p.H2, p.H3, p.H4}
-		for a := 0; a < 4; a++ {
-			for b := a + 1; b < 4; b++ {
-				if hs[a] == hs[b] {
-					t.Fatalf("H%d == H%d (%d) — message-types must be distinct", a+1, b+1, hs[a])
-				}
-			}
+		if p.S3 < 8 || p.S3 > 55 {
+			t.Fatalf("S3 out of range [8,55]: %d", p.S3)
 		}
+		if p.S4 < 4 || p.S4 > 27 {
+			t.Fatalf("S4 out of range [4,27]: %d", p.S4)
+		}
+		// H1-H4 — валидные непересекающиеся диапазоны в safe-half.
+		if !validHeaderRanges([4]HeaderRange{p.H1, p.H2, p.H3, p.H4}) {
+			t.Fatalf("H1-H4 not valid non-overlapping ranges: %+v %+v %+v %+v",
+				p.H1, p.H2, p.H3, p.H4)
+		}
+	}
+}
+
+// TestHeaderRangeUnmarshal — H читается и как объект (v2), и как число (v1).
+func TestHeaderRangeUnmarshal(t *testing.T) {
+	var v2 HeaderRange
+	if err := v2.UnmarshalJSON([]byte(`{"min":100,"max":200}`)); err != nil || v2 != (HeaderRange{100, 200}) {
+		t.Errorf("v2 object: got %+v err=%v, want {100,200}", v2, err)
+	}
+	var v1 HeaderRange
+	if err := v1.UnmarshalJSON([]byte(`123456`)); err != nil || v1 != (HeaderRange{123456, 123456}) {
+		t.Errorf("v1 number: got %+v err=%v, want {123456,123456}", v1, err)
+	}
+	var bad HeaderRange
+	if err := bad.UnmarshalJSON([]byte(`"oops"`)); err == nil {
+		t.Error("expected error on non-number/non-object header")
 	}
 }

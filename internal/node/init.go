@@ -72,6 +72,7 @@ func Init(p InitParams) (InitResult, error) {
 		NodeLabel:     p.Label,
 		ClusterSecret: cs.String(),
 		AwgParams:     params,
+		LocalObf:      awgparams.DefaultLocalObf(),
 		NetworkCIDR:   p.CIDR,
 		PrivateKey:    priv.String(),
 		PublicKey:     pub.String(),

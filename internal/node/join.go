@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/bootstrap"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
 	"github.com/tumour/awg-mesh/internal/handshake"
@@ -119,6 +120,7 @@ func Join(p JoinParams) (JoinResult, error) {
 		NodeLabel:     p.Label,
 		ClusterSecret: tok.Secret,
 		AwgParams:     resp.AwgParams,
+		LocalObf:      awgparams.DefaultLocalObf(),
 		NetworkCIDR:   resp.NetworkCIDR,
 		PrivateKey:    priv.String(),
 		PublicKey:     pub.String(),

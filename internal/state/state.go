@@ -24,10 +24,17 @@ import (
 // DefaultPath — стандартное место хранения state.json (chmod 600). Зависит от
 // ОС, поэтому определён в path_unix.go / path_windows.go (build-tags).
 
-// CurrentVersion — текущая версия схемы state.json. Save проставляет её, Load
-// реджектит файлы с иной версией (вместо молчаливого проглатывания несовместимого
-// формата). Поднимать при несовместимых изменениях схемы.
-const CurrentVersion = 1
+// CurrentVersion — текущая версия схемы state.json. Save проставляет её.
+// Load дочитывает ЛЮБУЮ version <= CurrentVersion (старую — с дефолтами для
+// новых полей), реджектит только version > CurrentVersion (state новее бинаря —
+// бинарь не знает его полей, читать опасно). Поднимать при изменениях схемы.
+//
+// v2 (AWG-2.0): H1-H4 стали диапазонами (HeaderRange) вместо uint32, добавлены
+// S3/S4 и per-node LocalObf (I1-I5). v1 дочитывается БЕСШУМНО:
+// HeaderRange.UnmarshalJSON ловит старое число H → {H,H}, s3/s4=0, local_obf
+// пуст → на проводе идентично v1 (self-upgrade не рвёт связь). На диск новая
+// схема ляжет при первом Save.
+const CurrentVersion = 2
 
 // State — корневая структура persistent state.
 type State struct {
@@ -35,9 +42,10 @@ type State struct {
 	NodeLabel string `json:"node_label"` // человекочитаемая метка ('beget', 'hetzner')
 
 	// Cluster identity
-	ClusterSecret string           `json:"cluster_secret"` // base32, 32 байта
-	AwgParams     awgparams.Params `json:"awg_params"`
-	NetworkCIDR   string           `json:"network_cidr"` // например "100.64.0.0/24"
+	ClusterSecret string             `json:"cluster_secret"` // base32, 32 байта
+	AwgParams     awgparams.Params   `json:"awg_params"`     // СЕТЕВЫЕ (flag-day), раздаются
+	LocalObf      awgparams.LocalObf `json:"local_obf"`      // ПО-НОДНЫЕ I1-I5, НЕ раздаются
+	NetworkCIDR   string             `json:"network_cidr"`   // например "100.64.0.0/24"
 
 	// Наша node identity
 	PrivateKey string `json:"private_key"` // base64 WG-encoded (32 байта)
@@ -82,10 +90,12 @@ func Load(path string) (*State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if s.Version != CurrentVersion {
-		return nil, fmt.Errorf("state %s: unsupported schema version %d (this meshd supports %d)",
+	if s.Version > CurrentVersion {
+		return nil, fmt.Errorf("state %s: schema version %d newer than this meshd supports (%d) — upgrade meshd",
 			path, s.Version, CurrentVersion)
 	}
+	// version < CurrentVersion дочитывается бесшумно: HeaderRange.UnmarshalJSON
+	// уже сконвертил старые H-числа, недостающие поля (s3/s4/local_obf) — нулевые.
 	return &s, nil
 }
 

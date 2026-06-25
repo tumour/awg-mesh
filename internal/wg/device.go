@@ -25,6 +25,39 @@ import (
 // handshake. Для NAT-only peer'ов (без endpoint) не ставится — они initiator'ы.
 const persistentKeepaliveSec = 25
 
+// MTU-расчёт для awg0. WG-дефолт 1420 рассчитан на path-MTU 1500, но «трудные»
+// пути (РФ→загранка, PPPoE) часто < 1500, а ICMP «fragmentation needed» на них
+// блэкхолится → полноразмерные пакеты молча дропаются (PMTU-блэкхол), крупный
+// TCP встаёт колом. AWG-2.0 усугубляет: s4-паддинг добавляется к КАЖДОМУ data-
+// пакету сверху WG-оверхеда. Проверено на проде (sel2→hetzner, path-MTU ~1450):
+// при MTU 1420 TCP РФ→загранка = 0.7 Мбит/с, при computed-MTU 1319 = 583 Мбит/с.
+//
+// Считаем автоматически из сетевого s4 — на каждой ноде, без ручной настройки.
+const (
+	// safePathMTU — консервативная цель path-MTU. Покрывает PPPoE-1492 и
+	// асимметричные РФ→загранка-пути (~1420-1480). Мобилу-1280 не покрывает —
+	// для неё MTU придётся занижать вручную (упирается в minMTU-пол).
+	safePathMTU = 1400
+	// wgWireOverhead — IPv4(20)+UDP(8)+WG-data-header(16)+Poly1305-tag(16).
+	wgWireOverhead = 60
+	// minMTU — пол: минимальный IPv6 MTU (RFC 8200), проходит на любом пути.
+	minMTU = 1280
+)
+
+// TunMTU возвращает MTU интерфейса awg0 с учётом AWG-overhead (включая s4-паддинг
+// каждого data-пакета): safePathMTU − wgWireOverhead − s4, зажатый в
+// [minMTU, device.DefaultMTU]. Зовётся в node.Run при создании device.
+func TunMTU(s4 int) int {
+	mtu := safePathMTU - wgWireOverhead - s4
+	if mtu < minMTU {
+		mtu = minMTU
+	}
+	if mtu > device.DefaultMTU {
+		mtu = device.DefaultMTU
+	}
+	return mtu
+}
+
 // Device — managed AmneziaWG interface (TUN + userspace device).
 type Device struct {
 	dev        *device.Device
@@ -36,8 +69,8 @@ type Device struct {
 
 // New создаёт TUN-интерфейс name и инициализирует AmneziaWG-device на нём.
 // device пока не сконфигурирован и не запущен — для этого Configure + Up.
-func New(name string, listenPort int, logLevel int) (*Device, error) {
-	tunDev, err := tun.CreateTUN(name, device.DefaultMTU)
+func New(name string, listenPort, mtu, logLevel int) (*Device, error) {
+	tunDev, err := tun.CreateTUN(name, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("create tun %s: %w", name, err)
 	}
@@ -64,13 +97,14 @@ func (d *Device) Name() string { return d.name }
 func (d *Device) Configure(
 	priv wgkey.Private,
 	awgp awgparams.Params,
+	localObf awgparams.LocalObf,
 	peers []state.Peer,
 	selfPubKey wgkey.Public,
 ) error {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "private_key=%s\n", priv.Hex())
 	fmt.Fprintf(&sb, "listen_port=%d\n", d.listenPort)
-	writeAwgParams(&sb, awgp)
+	writeAwgParams(&sb, awgp, localObf)
 	sb.WriteString("replace_peers=true\n")
 
 	for _, p := range peers {
@@ -130,16 +164,31 @@ func (d *Device) Close() {
 }
 
 // writeAwgParams сериализует AmneziaWG-параметры в UAPI-формат.
-func writeAwgParams(sb *strings.Builder, p awgparams.Params) {
+// H1-H4 — диапазоны "min-max" (amneziawg-go newMagicHeader; min==max → фикс.
+// значение). S3/S4 (AWG-2.0) шлём всегда: lib трактует 0 как «padding выключен».
+// I1-I5 — только непустые (per-node CPS-пакеты).
+func writeAwgParams(sb *strings.Builder, p awgparams.Params, lo awgparams.LocalObf) {
 	fmt.Fprintf(sb, "jc=%d\n", p.Jc)
 	fmt.Fprintf(sb, "jmin=%d\n", p.Jmin)
 	fmt.Fprintf(sb, "jmax=%d\n", p.Jmax)
 	fmt.Fprintf(sb, "s1=%d\n", p.S1)
 	fmt.Fprintf(sb, "s2=%d\n", p.S2)
-	fmt.Fprintf(sb, "h1=%d\n", p.H1)
-	fmt.Fprintf(sb, "h2=%d\n", p.H2)
-	fmt.Fprintf(sb, "h3=%d\n", p.H3)
-	fmt.Fprintf(sb, "h4=%d\n", p.H4)
+	fmt.Fprintf(sb, "s3=%d\n", p.S3)
+	fmt.Fprintf(sb, "s4=%d\n", p.S4)
+	writeHeader(sb, "h1", p.H1)
+	writeHeader(sb, "h2", p.H2)
+	writeHeader(sb, "h3", p.H3)
+	writeHeader(sb, "h4", p.H4)
+	for i, spec := range [5]string{lo.I1, lo.I2, lo.I3, lo.I4, lo.I5} {
+		if spec != "" {
+			fmt.Fprintf(sb, "i%d=%s\n", i+1, spec)
+		}
+	}
+}
+
+// writeHeader — magic-header в формате "key=min-max".
+func writeHeader(sb *strings.Builder, key string, h awgparams.HeaderRange) {
+	fmt.Fprintf(sb, "%s=%d-%d\n", key, h.Min, h.Max)
 }
 
 // writePeer добавляет один peer block в UAPI-команду.

@@ -22,7 +22,7 @@ type fakeDevice struct {
 	closed     bool
 }
 
-func (f *fakeDevice) Configure(wgkey.Private, awgparams.Params, []state.Peer, wgkey.Public) error {
+func (f *fakeDevice) Configure(wgkey.Private, awgparams.Params, awgparams.LocalObf, []state.Peer, wgkey.Public) error {
 	f.configured = true
 	return nil
 }
@@ -87,7 +87,7 @@ func TestRunOrchestratesDeviceAndLinker(t *testing.T) {
 		Interface:      "awg0",
 		GossipInterval: 0, // gossip-клиент выключен
 		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		NewDevice:      func(string, int, int) (Device, error) { return dev, nil },
+		NewDevice:      func(string, int, int, int) (Device, error) { return dev, nil },
 		Linker:         lnk,
 	})
 	if err != nil {

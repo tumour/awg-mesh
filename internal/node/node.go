@@ -32,7 +32,7 @@ import (
 // вместе с Options.NewDevice/Linker позволяет прогнать run-flow с фейками, без
 // реального TUN/root.
 type Device interface {
-	Configure(priv wgkey.Private, awgp awgparams.Params, peers []state.Peer, selfPubKey wgkey.Public) error
+	Configure(priv wgkey.Private, awgp awgparams.Params, localObf awgparams.LocalObf, peers []state.Peer, selfPubKey wgkey.Public) error
 	UpdatePeer(p state.Peer) error
 	Up() error
 	Name() string
@@ -50,7 +50,7 @@ type Options struct {
 	Logger *slog.Logger
 	// NewDevice/Linker (опц., nil → wg.New / wg.DefaultLinker) — фабрика userspace-
 	// устройства и порт настройки линка. Инъектируемы → run-flow тестируем с фейками.
-	NewDevice func(name string, listenPort, logLevel int) (Device, error)
+	NewDevice func(name string, listenPort, mtu, logLevel int) (Device, error)
 	Linker    wg.Linker
 	// FirewallWarn (опц.) вызывается после поднятия интерфейса с его именем — cmd
 	// передаёт сюда host-integration проверку (UFW), вне домена и оркестрации.
@@ -67,8 +67,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	newDevice := opts.NewDevice
 	if newDevice == nil {
-		newDevice = func(name string, listenPort, logLevel int) (Device, error) {
-			return wg.New(name, listenPort, logLevel)
+		newDevice = func(name string, listenPort, mtu, logLevel int) (Device, error) {
+			return wg.New(name, listenPort, mtu, logLevel)
 		}
 	}
 	linker := opts.Linker
@@ -80,6 +80,20 @@ func Run(ctx context.Context, opts Options) error {
 	s, err := store.Read()
 	if err != nil {
 		return err
+	}
+
+	// Если state дочитан из старой схемы (Load оставляет прежнюю Version, Save
+	// проставит текущую) — разово перепишем файл в актуальный формат. Иначе диск
+	// застрянет в старой схеме и будет мигрироваться при каждом старте, а после
+	// удаления legacy-чтения в будущей версии — перестанет читаться вовсе.
+	if s.Version < state.CurrentVersion {
+		from := s.Version
+		if migrated, err := store.Update(func(*state.State) error { return nil }); err != nil {
+			logger.Warn("rewrite migrated state to current schema failed", "err", err)
+		} else {
+			s = migrated
+			logger.Info("state migrated to current schema", "from", from, "to", state.CurrentVersion)
+		}
 	}
 
 	priv, err := wgkey.ParsePrivate(s.PrivateKey)
@@ -105,16 +119,20 @@ func Run(ctx context.Context, opts Options) error {
 		logger.Warn("cleanup stale interface failed", "iface", opts.Interface, "err", err)
 	}
 
-	device, err := newDevice(opts.Interface, listenPort, logLevel)
+	// MTU awg0 с учётом AWG-overhead (s4-паддинг на каждый data-пакет) —
+	// иначе крупный TCP на путях с path-MTU < 1500 уходит в PMTU-блэкхол.
+	mtu := wg.TunMTU(s.AwgParams.S4)
+
+	device, err := newDevice(opts.Interface, listenPort, mtu, logLevel)
 	if err != nil {
 		return fmt.Errorf("create wg device: %w", err)
 	}
 	defer device.Close()
 
 	logger.Info("interface created", "iface", device.Name(),
-		"mesh_ip", s.NodeIP, "peers", len(s.Peers), "seed", s.IsSeed)
+		"mesh_ip", s.NodeIP, "peers", len(s.Peers), "seed", s.IsSeed, "mtu", mtu)
 
-	if err := device.Configure(priv, s.AwgParams, s.Peers, pub); err != nil {
+	if err := device.Configure(priv, s.AwgParams, s.LocalObf, s.Peers, pub); err != nil {
 		return fmt.Errorf("configure device: %w", err)
 	}
 	if err := device.Up(); err != nil {
