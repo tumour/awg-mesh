@@ -3,7 +3,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
-## [Unreleased]
+## [0.5.0] — 2026-06-25
 
 AmneziaWG-2.0 обфускация — против stateful-DPI, который душит поток после
 успешного handshake (handshake проходит, transport-данные дропаются — особенно
