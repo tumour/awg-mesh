@@ -37,6 +37,7 @@ func TestPendingDue(t *testing.T) {
 	t0 := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	committed := &state.PendingParams{ApplyAt: t0}
 	announced := &state.PendingParams{Version: 5} // ApplyAt нулевой — ещё не закоммичен
+	const maxStale = time.Minute
 	cases := []struct {
 		name string
 		p    *state.PendingParams
@@ -47,10 +48,14 @@ func TestPendingDue(t *testing.T) {
 		{"announced (ApplyAt нулевой) — не применять", announced, t0, false},
 		{"committed, до ApplyAt", committed, t0.Add(-time.Second), false},
 		{"committed, ровно ApplyAt", committed, t0, true},
-		{"committed, после ApplyAt", committed, t0.Add(time.Second), true},
+		{"committed, чуть после ApplyAt (в окне)", committed, t0.Add(time.Second), true},
+		// Защита от «бродячего» Pending: ApplyAt давно прошёл (подхвачен по gossip
+		// после отката) → НЕ применять, иначе мгновенный незапланированный flip.
+		{"committed, ApplyAt протух (> maxStale назад)", committed, t0.Add(2 * time.Minute), false},
+		{"committed, ровно граница maxStale — ещё валидно", committed, t0.Add(maxStale), true},
 	}
 	for _, c := range cases {
-		if got := PendingDue(c.p, c.now); got != c.want {
+		if got := PendingDue(c.p, c.now, maxStale); got != c.want {
 			t.Errorf("%s: = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -72,7 +77,7 @@ func TestNewPending(t *testing.T) {
 	if !ShouldAdoptPending(7, nil, pend) {
 		t.Error("свежий announced Pending должен приниматься поверх current=7")
 	}
-	if PendingDue(pend, time.Now()) {
+	if PendingDue(pend, time.Now(), time.Minute) {
 		t.Error("announced Pending не должен быть due (нет ApplyAt)")
 	}
 }
@@ -80,10 +85,10 @@ func TestNewPending(t *testing.T) {
 func TestAllPeersAcked(t *testing.T) {
 	const self = "SELF"
 	peers := []state.Peer{
-		{PublicKey: self, NodeIP: "100.64.0.1"},          // мы — пропускается
-		{PublicKey: "A", NodeIP: "100.64.0.2"},           // должен ack
-		{PublicKey: "B", NodeIP: "100.64.0.3"},           // должен ack
-		{PublicKey: "GHOST", NodeIP: ""},                 // без mesh-IP — пропускается
+		{PublicKey: self, NodeIP: "100.64.0.1"}, // мы — пропускается
+		{PublicKey: "A", NodeIP: "100.64.0.2"},  // должен ack
+		{PublicKey: "B", NodeIP: "100.64.0.3"},  // должен ack
+		{PublicKey: "GHOST", NodeIP: ""},        // без mesh-IP — пропускается
 	}
 	cases := []struct {
 		name string

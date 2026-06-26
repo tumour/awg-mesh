@@ -226,7 +226,12 @@ func Run(ctx context.Context, opts Options) error {
 
 	// flag-day-смена params: применяем Pending в назначенный ApplyAt (синхронно
 	// со всей сетью). reconfigure на лету, без пересоздания awg0.
-	go runParamFlip(ctx, store, device, flipInterval, logger)
+	// commitGrace/maxStale привязаны к gossip-интервалу: ApplyAt должен разойтись по
+	// gossip ДО применения, иначе ноды, не успевшие его получить, не применят flip →
+	// рассинхрон (баг, положивший сеть). maxStale = commitGrace: применяем только если
+	// ApplyAt прошёл недавно (защита от «бродячего» Pending после отката).
+	commitGrace := commitGraceFor(opts.GossipInterval)
+	go runParamFlip(ctx, store, device, flipInterval, commitGrace, logger)
 
 	// revoke/leave: снимаем отозванных с device НЕЗАВИСИМО от gossip-pull. Иначе при
 	// offline-таргете / в 2-нодовой сети / при NAT-leave (у leaver'а нет endpoint,
@@ -237,7 +242,7 @@ func Run(ctx context.Context, opts Options) error {
 	// подтвердили его приём (ack-then-commit) — иначе flip не стартует и сеть
 	// остаётся на старом наборе целиком (ни одну ноду не теряем).
 	if s.IsSeed {
-		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, logger)
+		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, commitGrace, logger)
 	}
 
 	logger.Info("ready, waiting for signals")
@@ -273,7 +278,7 @@ func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public, logger *slo
 
 // runParamFlip периодически применяет запланированную flag-day-смену params,
 // когда наступает её ApplyAt. Завершается по ctx.
-func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval time.Duration, logger *slog.Logger) {
+func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval, maxStale time.Duration, logger *slog.Logger) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -281,7 +286,7 @@ func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			applyDueParams(store, dev, logger)
+			applyDueParams(store, dev, maxStale, logger)
 		}
 	}
 }
@@ -290,12 +295,12 @@ func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval 
 // набор в state (под Store.Update, RMW-safe) и reconfigure'ит device на лету.
 // Решение «пора ли» — доменное (mesh.PendingDue); здесь только применение.
 // Идемпотентно: не пора / нет Pending → ErrNoChange (диск не трогаем).
-func applyDueParams(store *state.Store, dev Device, logger *slog.Logger) {
+func applyDueParams(store *state.Store, dev Device, maxStale time.Duration, logger *slog.Logger) {
 	var applied awgparams.Params
 	var version uint64
 	var did bool // выставляется в fn только при реальном применении (Update гасит ErrNoChange в nil)
 	if _, err := store.Update(func(s *state.State) error {
-		if !mesh.PendingDue(s.Pending, time.Now().UTC()) {
+		if !mesh.PendingDue(s.Pending, time.Now().UTC(), maxStale) {
 			return state.ErrNoChange
 		}
 		applied, version, did = s.Pending.Params, s.Pending.Version, true
@@ -385,14 +390,25 @@ func reapRevoked(store *state.Store, dev Device, logger *slog.Logger) {
 	}
 }
 
-// commitGrace — фора между назначением ApplyAt (когда все ноды подтвердили
-// приём Pending) и самим flip: чтобы commit (ApplyAt) успел разойтись по gossip
-// до момента применения. Короткая — все уже знают сам Pending, осталось ApplyAt.
-const commitGrace = 30 * time.Second
+// commitGraceCycles — на сколько gossip-циклов отодвигается ApplyAt от момента
+// commit. ApplyAt обязан РАЗОЙТИСЬ по gossip ДО применения, иначе ноды, не успевшие
+// его получить, не применят flip → рассинхрон (этот баг положил сеть в эксплуатации:
+// commitGrace был фикс. 30с < gossip-интервала 60с, seed применил один). Берём с
+// запасом: ноды за NAT пуллят seed не каждый цикл, одного-двух мало.
+const commitGraceCycles = 6
+
+// commitGraceFor — фора ApplyAt, привязанная к gossip-интервалу (commitGraceCycles
+// циклов), с нижней границей 30с для малых интервалов/тестов. См. commitGraceCycles.
+func commitGraceFor(gossipInterval time.Duration) time.Duration {
+	if g := commitGraceCycles * gossipInterval; g > 30*time.Second {
+		return g
+	}
+	return 30 * time.Second
+}
 
 // runParamCommit (seed-only) назначает ApplyAt анонсированному Pending, когда
 // ВСЕ ноды подтвердили его приём. Завершается по ctx.
-func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Acks() map[string]uint64 }, selfPub string, interval time.Duration, logger *slog.Logger) {
+func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Acks() map[string]uint64 }, selfPub string, interval, grace time.Duration, logger *slog.Logger) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -400,14 +416,14 @@ func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Ack
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			commitIfAllAcked(store, acks.Acks(), selfPub, logger)
+			commitIfAllAcked(store, acks.Acks(), selfPub, grace, logger)
 		}
 	}
 }
 
 // commitIfAllAcked назначает ApplyAt, если есть анонсированный Pending и все
 // пиры подтвердили его приём (домен mesh.AllPeersAcked/CommitPending). Идемпотентно.
-func commitIfAllAcked(store *state.Store, acks map[string]uint64, selfPub string, logger *slog.Logger) {
+func commitIfAllAcked(store *state.Store, acks map[string]uint64, selfPub string, grace time.Duration, logger *slog.Logger) {
 	var committed *state.PendingParams
 	if _, err := store.Update(func(s *state.State) error {
 		if s.Pending == nil || !s.Pending.ApplyAt.IsZero() {
@@ -416,7 +432,7 @@ func commitIfAllAcked(store *state.Store, acks map[string]uint64, selfPub string
 		if !mesh.AllPeersAcked(s.Peers, selfPub, acks, s.Pending.Version) {
 			return state.ErrNoChange // не все подтвердили — ждём
 		}
-		mesh.CommitPending(s.Pending, time.Now().UTC(), commitGrace)
+		mesh.CommitPending(s.Pending, time.Now().UTC(), grace)
 		committed = s.Pending
 		return nil
 	}); err != nil {

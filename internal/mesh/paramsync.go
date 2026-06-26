@@ -45,8 +45,18 @@ func ShouldAdoptPending(currentVersion uint64, local, remote *state.PendingParam
 
 // PendingDue сообщает, наступил ли момент применить Pending. ApplyAt с нулевым
 // значением = «ещё не закоммичен» (ждём ack от всех нод) → НЕ применяем.
-func PendingDue(p *state.PendingParams, now time.Time) bool {
-	return p != nil && !p.ApplyAt.IsZero() && !now.Before(p.ApplyAt)
+//
+// maxStale защищает от «бродячего» Pending: если ApplyAt прошёл БОЛЬШЕ чем maxStale
+// назад, Pending считается протухшим и НЕ применяется. Иначе Pending с давно
+// прошедшим ApplyAt (например подхваченный по gossip уже ПОСЛЕ отката ноды на старый
+// набор) применился бы мгновенно при adopt → незапланированный flip и рассинхрон.
+// maxStale должен покрывать легитимное опоздание (нода получила ApplyAt чуть позже
+// срока из-за gossip-задержки), но быть много меньше «давнего» бродячего Pending.
+func PendingDue(p *state.PendingParams, now time.Time, maxStale time.Duration) bool {
+	if p == nil || p.ApplyAt.IsZero() || now.Before(p.ApplyAt) {
+		return false
+	}
+	return now.Sub(p.ApplyAt) <= maxStale
 }
 
 // NewPending формирует анонс смены для seed: следующая версия, новые params,
