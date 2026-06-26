@@ -561,6 +561,69 @@ func TestDoRoundAdoptsNewerPending(t *testing.T) {
 	}
 }
 
+// doRound подхватывает committed ApplyAt на УЖЕ принятый announced-Pending той же
+// версии. Это сценарий из эксплуатации, дважды клавший сеть: нода держит анонс (ApplyAt=0),
+// seed закоммитил (ApplyAt назначен, версия НЕ менялась) — без распространения этого
+// перехода момент применения не доходит и флипает только seed.
+func TestDoRoundAdoptsCommitOnAnnounced(t *testing.T) {
+	const self, targetKey = "selfkey", "targetkey"
+	applyAt := time.Now().Add(2 * time.Minute).UTC()
+	committedPend := &state.PendingParams{Version: 5, ApplyAt: applyAt, Params: awgparams.Params{S4: 16}}
+	host, port, ts := fakeServerWithPending(t,
+		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
+		4, committedPend)
+	defer ts.Close()
+
+	// Локально уже лежит ТОТ ЖЕ Pending v5, но ещё announced (ApplyAt нулевой).
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
+		ParamsVersion: 4,
+		Pending:       &state.PendingParams{Version: 5, Params: awgparams.Params{S4: 16}}, // ApplyAt=0
+		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+	})
+	c := NewClient(store, self, time.Minute, port, nil, nil, discardLogger())
+
+	c.doRound(context.Background())
+
+	got, _ := store.Read()
+	if got.Pending == nil || got.Pending.Version != 5 {
+		t.Fatalf("Pending v5 должен сохраниться: %+v", got.Pending)
+	}
+	if got.Pending.ApplyAt.IsZero() {
+		t.Fatal("committed ApplyAt НЕ подхвачен — flip снова случится только на seed (тот самый баг)")
+	}
+	if !got.Pending.ApplyAt.Equal(applyAt) {
+		t.Errorf("ApplyAt = %v, want %v", got.Pending.ApplyAt, applyAt)
+	}
+}
+
+// doRound НЕ пере-планирует уже committed Pending (анти-reschedule): чужой committed
+// с другим ApplyAt на той же версии отвергается.
+func TestDoRoundDoesNotRescheduleCommitted(t *testing.T) {
+	const self, targetKey = "selfkey", "targetkey"
+	ours := time.Now().Add(time.Minute).UTC()
+	theirs := time.Now().Add(10 * time.Minute).UTC()
+	host, port, ts := fakeServerWithPending(t,
+		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
+		4, &state.PendingParams{Version: 5, ApplyAt: theirs})
+	defer ts.Close()
+
+	store := saveState(t, &state.State{
+		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
+		ParamsVersion: 4,
+		Pending:       &state.PendingParams{Version: 5, ApplyAt: ours}, // уже committed у нас
+		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
+	})
+	c := NewClient(store, self, time.Minute, port, nil, nil, discardLogger())
+
+	c.doRound(context.Background())
+
+	got, _ := store.Read()
+	if !got.Pending.ApplyAt.Equal(ours) {
+		t.Fatalf("ApplyAt пере-планирован чужим committed: got %v, want %v", got.Pending.ApplyAt, ours)
+	}
+}
+
 // doRound ИГНОРИРУЕТ устаревший Pending (версия не новее уже применённой).
 func TestDoRoundIgnoresStalePending(t *testing.T) {
 	const self, targetKey = "selfkey", "targetkey"

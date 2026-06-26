@@ -27,20 +27,30 @@ import (
 // и device — в internal/node, транспорт — в internal/gossip. Покрыто таблицами.
 
 // ShouldAdoptPending решает, принять ли Pending, полученный от пира через gossip.
-// Принимаем СТРОГО более новый: версия выше уже применённой (currentVersion) И
-// выше уже отложенного локально. Монотонность даёт идемпотентность (повторный
-// приём — no-op) и защищает от отката на старый набор.
+//
+// Базово принимаем СТРОГО более новую версию (выше уже применённой currentVersion И
+// выше уже отложенной локально) — монотонность даёт идемпотентность и защищает от
+// отката на старый набор.
+//
+// ДОПОЛНИТЕЛЬНО принимаем переход «announced → committed» в пределах ОДНОЙ версии:
+// локально лежит анонс (ApplyAt=0), а пришёл тот же Pending уже с назначенным
+// ApplyAt. Без этого момент применения (его проставляет seed при commit, НЕ меняя
+// версию) не распространяется на ноды, уже принявшие анонс, — и flip происходит
+// только на seed → рассинхрон (баг, дважды клавший сеть). Принимаем строго один раз:
+// уже committed повторно не пере-планируется (иначе злая нода сдвинула бы flip) и
+// назад на announced не откатывается.
 func ShouldAdoptPending(currentVersion uint64, local, remote *state.PendingParams) bool {
-	switch {
-	case remote == nil:
-		return false
-	case remote.Version <= currentVersion:
-		return false // не новее уже применённого — устарело
-	case local != nil && remote.Version <= local.Version:
-		return false // не новее уже отложенного локально
-	default:
-		return true
+	if remote == nil || remote.Version <= currentVersion {
+		return false // нет анонса / не новее уже применённого — устарело
 	}
+	if local == nil || remote.Version > local.Version {
+		return true // локального нет / пришёл строго новее — принять
+	}
+	if remote.Version < local.Version {
+		return false // пришёл старее отложенного — отвергнуть
+	}
+	// Та же версия: принять ТОЛЬКО commit поверх локального анонса (announced→committed).
+	return local.ApplyAt.IsZero() && !remote.ApplyAt.IsZero()
 }
 
 // PendingDue сообщает, наступил ли момент применить Pending. ApplyAt с нулевым

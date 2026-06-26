@@ -392,10 +392,10 @@ func reapRevoked(store *state.Store, dev Device, logger *slog.Logger) {
 
 // commitGraceCycles — на сколько gossip-циклов отодвигается ApplyAt от момента
 // commit. ApplyAt обязан РАЗОЙТИСЬ по gossip ДО применения, иначе ноды, не успевшие
-// его получить, не применят flip → рассинхрон (этот баг положил сеть в эксплуатации:
-// commitGrace был фикс. 30с < gossip-интервала 60с, seed применил один). Берём с
-// запасом: ноды за NAT пуллят seed не каждый цикл, одного-двух мало.
-const commitGraceCycles = 6
+// его получить, не применят flip → рассинхрон. Истинная причина непропагации была в
+// ShouldAdoptPending (committed-Pending отвергался как «не новее»), а не в малом
+// grace; после её фикса 2 цикла хватает на распространение (+ окно maxStale сверху).
+const commitGraceCycles = 2
 
 // commitGraceFor — фора ApplyAt, привязанная к gossip-интервалу (commitGraceCycles
 // циклов), с нижней границей 30с для малых интервалов/тестов. См. commitGraceCycles.

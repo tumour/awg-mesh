@@ -10,6 +10,11 @@ import (
 
 func pending(v uint64) *state.PendingParams { return &state.PendingParams{Version: v} }
 
+// committed — Pending версии v с уже назначенным ApplyAt (момент применения).
+func committed(v uint64) *state.PendingParams {
+	return &state.PendingParams{Version: v, ApplyAt: time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)}
+}
+
 func TestShouldAdoptPending(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -23,8 +28,22 @@ func TestShouldAdoptPending(t *testing.T) {
 		{"remote == current — уже применён", 5, nil, pending(5), false},
 		{"remote новее current, локального нет", 5, nil, pending(6), true},
 		{"remote новее и current, и локального", 5, pending(6), pending(7), true},
-		{"remote == локального pending — повтор, no-op", 5, pending(7), pending(7), false},
+		{"remote == локального pending (оба announced) — повтор, no-op", 5, pending(7), pending(7), false},
 		{"remote старее локального pending", 5, pending(8), pending(7), false},
+
+		// КЛЮЧЕВОЙ ФИКС: commit распространяется на ту же версию. Нода держит
+		// announced-Pending (ApplyAt=0), seed прислал тот же Pending уже с ApplyAt —
+		// без этого момент применения не доходит и флипает только seed (баг,
+		// дважды клавший сеть).
+		{"committed приходит на announced той же версии — ПРИНЯТЬ", 5, pending(6), committed(6), true},
+		// Анти-reschedule: уже committed нельзя пере-планировать чужим committed.
+		{"committed на committed (та же версия) — отвергнуть (анти-reschedule)", 5, committed(6), committed(6), false},
+		// Не откатываемся с committed обратно на announced.
+		{"announced на committed (та же версия) — отвергнуть (не назад)", 5, committed(6), pending(6), false},
+		// committed уже применённой версии — устарело.
+		{"committed версии <= current — устарело", 6, nil, committed(6), false},
+		// Более новая версия побеждает независимо от commit-состояния локальной.
+		{"announced новее версии, локально committed — принять (новее)", 5, committed(6), pending(7), true},
 	}
 	for _, c := range cases {
 		if got := ShouldAdoptPending(c.curVersion, c.local, c.remote); got != c.want {
