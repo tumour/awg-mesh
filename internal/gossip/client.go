@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,7 +29,10 @@ type Client struct {
 	// onRemovedPeers вызывается с отозванными (tombstone) peer'ами — снять с
 	// wg-device через RemovePeer (на лету, без рестарта).
 	onRemovedPeers func(peers []state.Peer)
-	log            *slog.Logger
+	// selector выбирает цель опроса с учётом runtime-доступности: стабильно-
+	// недостижимый endpoint-пир уходит в backoff, чтобы не жечь ½ циклов на таймаут.
+	selector *targetSelector
+	log      *slog.Logger
 }
 
 // NewClient создаёт gossip-клиента. onNewPeers/onRemovedPeers — callback'и для
@@ -56,6 +58,7 @@ func NewClient(
 		http:           &http.Client{Timeout: 10 * time.Second},
 		onNewPeers:     onNewPeers,
 		onRemovedPeers: onRemovedPeers,
+		selector:       newTargetSelector(interval),
 		log:            logger.With("component", "gossip"),
 	}
 }
@@ -88,24 +91,25 @@ func (c *Client) doRound(ctx context.Context) {
 	// Кандидаты = достижимые пиры (доменное правило mesh.GossipCandidates):
 	// не долбимся к узлу, к которому by-design нет пути (оба за NAT) — иначе
 	// гарантированный таймаут + каскад wg junk-retry в логах, без обмена данными.
-	target := pickRandomPeer(mesh.GossipCandidates(st))
+	// selector ещё и исключает тех, кто фейлит ПРЯМО СЕЙЧАС (backoff), чтобы не
+	// терять циклы на стабильно-недостижимый endpoint-пир.
+	now := time.Now()
+	target := c.selector.pick(mesh.GossipCandidates(st), now)
 	if target == nil {
 		// Нет достижимых peer'ов кроме себя — нечего гoссипить.
 		return
 	}
 
-	// ack: сообщаем цели, до какой версии params мы в курсе (применённая или
-	// принятый Pending) — seed по этим репортам решает, все ли получили Pending.
-	acked := st.ParamsVersion
-	if st.Pending != nil && st.Pending.Version > acked {
-		acked = st.Pending.Version
-	}
-
-	resp, err := c.fetchPeers(ctx, target.NodeIP, acked)
+	// ack: шлём цели ДВА репорта — announce-ack (видели анонс до версии) и commit-ack
+	// (держим committed ApplyAt до версии). Seed по первому коммитит ApplyAt, по
+	// второму «вооружает» flip; расхождение и есть защита от strand'а медленной ноды.
+	resp, err := c.fetchPeers(ctx, target.NodeIP, mesh.AnnounceAckVersion(st), mesh.CommitAckVersion(st))
 	if err != nil {
+		c.selector.recordFailure(target.PublicKey, now)
 		c.log.Warn("fetch peers failed", "peer", target.Label, "mesh_ip", target.NodeIP, "err", err)
 		return
 	}
+	c.selector.recordSuccess(target.PublicKey)
 
 	// Merge — внутри Update, против свежего state: между fetch'ем и записью
 	// bootstrap-listener мог зарегистрировать нового peer'а, merge поверх
@@ -179,9 +183,14 @@ func (c *Client) doRound(ctx context.Context) {
 }
 
 // fetchPeers — HTTP GET /v1/peers через wg-туннель. ctx прокидывается, чтобы
-// летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута.
-func (c *Client) fetchPeers(ctx context.Context, meshIP string, ackVersion uint64) (*PeersResponse, error) {
-	q := url.Values{"node": {c.selfPub}, "v": {strconv.FormatUint(ackVersion, 10)}}
+// летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута. announceAck/
+// commitAck — два ack-репорта (см. doRound).
+func (c *Client) fetchPeers(ctx context.Context, meshIP string, announceAck, commitAck uint64) (*PeersResponse, error) {
+	q := url.Values{
+		"node": {c.selfPub},
+		"v":    {strconv.FormatUint(announceAck, 10)},
+		"cv":   {strconv.FormatUint(commitAck, 10)},
+	}
 	reqURL := fmt.Sprintf("http://%s:%d/v1/peers?%s", meshIP, c.port, q.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -200,16 +209,6 @@ func (c *Client) fetchPeers(ctx context.Context, meshIP string, ackVersion uint6
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &out, nil
-}
-
-// pickRandomPeer возвращает случайного peer'а из готового списка кандидатов
-// (фильтрация себя/достижимости — в mesh.GossipCandidates). nil если список пуст.
-func pickRandomPeer(candidates []state.Peer) *state.Peer {
-	if len(candidates) == 0 {
-		return nil
-	}
-	picked := candidates[rand.IntN(len(candidates))]
-	return &picked
 }
 
 // PushTombstone отправляет один tombstone на /v1/tombstone цели (через wg-туннель).

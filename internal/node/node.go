@@ -122,6 +122,26 @@ func Run(ctx context.Context, opts Options) error {
 		s = pruned
 	}
 
+	// Backfill дефолтной обфускации (I1 = QUIC-мимик): мигрированные с v1 ноды имеют
+	// ПУСТОЙ local_obf (миграция оставляла его пустым ради wire-identical апгрейда).
+	// Без I1 у инициатора нет маскировки старта потока → stateful-DPI душит сессию.
+	// I1 initiator-local (получатель игнорирует) → backfill безопасен для уже живых
+	// туннелей. Заданную вручную обфускацию не трогаем (ErrNoChange при гонке).
+	if s.LocalObf.IsEmpty() {
+		if filled, err := store.Update(func(st *state.State) error {
+			if !st.LocalObf.IsEmpty() {
+				return state.ErrNoChange
+			}
+			st.LocalObf = awgparams.DefaultLocalObf()
+			return nil
+		}); err != nil {
+			logger.Warn("backfill default obfuscation failed", "err", err)
+		} else {
+			s = filled
+			logger.Info("default obfuscation backfilled (I1 QUIC-mimic) into empty local_obf")
+		}
+	}
+
 	priv, err := wgkey.ParsePrivate(s.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("parse private key: %w", err)
@@ -224,25 +244,29 @@ func Run(ctx context.Context, opts Options) error {
 		go gc.Run(ctx)
 	}
 
-	// flag-day-смена params: применяем Pending в назначенный ApplyAt (синхронно
-	// со всей сетью). reconfigure на лету, без пересоздания awg0.
-	// commitGrace/maxStale привязаны к gossip-интервалу: ApplyAt должен разойтись по
-	// gossip ДО применения, иначе ноды, не успевшие его получить, не применят flip →
-	// рассинхрон (баг, положивший сеть). maxStale = commitGrace: применяем только если
-	// ApplyAt прошёл недавно (защита от «бродячего» Pending после отката).
+	// flag-day-смена params: применяем Pending в назначенный ApplyAt (синхронно со
+	// всей сетью), reconfigure на лету. Тайминги привязаны к gossip-интервалу:
+	//  • commitGrace (= maxStale flip'а) — фора, за которую committed ApplyAt должен
+	//    разойтись по gossip ДО применения;
+	//  • abortMargin — запас перед ApplyAt, до которого seed решает abort, если не все
+	//    подтвердили приём ApplyAt (commitGrace > abortMargin, чтобы зазор был).
+	// flipper держит in-memory seenAt: когда нода ВПЕРВЫЕ увидела committed ApplyAt —
+	// флипаем только если держим его достаточно давно (любой abort бы успел дойти).
 	commitGrace := commitGraceFor(opts.GossipInterval)
-	go runParamFlip(ctx, store, device, flipInterval, commitGrace, logger)
+	abortMargin := abortMarginFor(opts.GossipInterval)
+	flipper := &paramFlipper{store: store, dev: device, abortMargin: abortMargin, maxStale: commitGrace, log: logger}
+	go runParamFlip(ctx, flipper, flipInterval)
 
 	// revoke/leave: снимаем отозванных с device НЕЗАВИСИМО от gossip-pull. Иначе при
 	// offline-таргете / в 2-нодовой сети / при NAT-leave (у leaver'а нет endpoint,
 	// seed не имеет gossip-кандидата) отозванный остался бы живым peer'ом на device.
 	go runTombstoneReap(ctx, store, device, flipInterval, logger)
 
-	// seed назначает ApplyAt анонсированному Pending только когда ВСЕ ноды
-	// подтвердили его приём (ack-then-commit) — иначе flip не стартует и сеть
-	// остаётся на старом наборе целиком (ни одну ноду не теряем).
+	// seed: commit-гейт назначает ApplyAt, когда все подтвердили АНОНС; arm/abort-гейт
+	// отменяет flip (переанонс v+1), если к дедлайну не все подтвердили приём ApplyAt —
+	// тогда не флипает никто, сеть цела, ретрай (гарантия «ноду не теряем»).
 	if s.IsSeed {
-		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, commitGrace, logger)
+		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, commitGrace, abortMargin, logger)
 	}
 
 	logger.Info("ready, waiting for signals")
@@ -276,9 +300,23 @@ func pushPeers(store *state.Store, dev Device, selfPub wgkey.Public, logger *slo
 	}
 }
 
-// runParamFlip периодически применяет запланированную flag-day-смену params,
-// когда наступает её ApplyAt. Завершается по ctx.
-func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval, maxStale time.Duration, logger *slog.Logger) {
+// paramFlipper применяет запланированную flag-day-смену params в её ApplyAt. Держит
+// in-memory, когда ВПЕРВЫЕ увидел committed ApplyAt текущей версии (seenVer/seenAt):
+// флипаем только если держим его не меньше abortMargin — коммит, полученный впритык,
+// не применяем, т.к. возможен abort в полёте, который мы ещё не получили (анти-split).
+type paramFlipper struct {
+	store       *state.Store
+	dev         Device
+	abortMargin time.Duration
+	maxStale    time.Duration
+	log         *slog.Logger
+
+	seenVer uint64    // версия committed Pending, который мы наблюдаем (0 = коммита нет)
+	seenAt  time.Time // когда впервые увидели его ApplyAt
+}
+
+// runParamFlip тикает flipper.tick до отмены ctx.
+func runParamFlip(ctx context.Context, f *paramFlipper, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -286,21 +324,45 @@ func runParamFlip(ctx context.Context, store *state.Store, dev Device, interval,
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			applyDueParams(store, dev, maxStale, logger)
+			f.tick(time.Now().UTC())
 		}
 	}
 }
 
-// applyDueParams применяет Pending, если наступил его ApplyAt: фиксирует новый
-// набор в state (под Store.Update, RMW-safe) и reconfigure'ит device на лету.
-// Решение «пора ли» — доменное (mesh.PendingDue); здесь только применение.
+// tick: обновить наблюдение за committed ApplyAt, затем применить, если пора и держим
+// достаточно давно (mesh.ShouldFire).
+func (f *paramFlipper) tick(now time.Time) {
+	s, err := f.store.Read()
+	if err != nil {
+		f.log.Warn("flip: read state failed", "err", err)
+		return
+	}
+	f.observe(s.Pending, now)
+	f.applyIfDue(now)
+}
+
+// observe запоминает момент первого наблюдения committed ApplyAt текущей версии.
+// Анонс (ApplyAt=0) или отсутствие Pending сбрасывают наблюдение — следующий commit
+// (в т.ч. после abort'а на v+1) переснимет seenAt заново.
+func (f *paramFlipper) observe(p *state.PendingParams, now time.Time) {
+	if p == nil || p.ApplyAt.IsZero() {
+		f.seenVer = 0
+		return
+	}
+	if p.Version != f.seenVer {
+		f.seenVer, f.seenAt = p.Version, now
+	}
+}
+
+// applyIfDue фиксирует новый набор в state (под Store.Update, RMW-safe) и reconfigure'ит
+// device на лету, если mesh.ShouldFire (due + держим ApplyAt дольше abortMargin).
 // Идемпотентно: не пора / нет Pending → ErrNoChange (диск не трогаем).
-func applyDueParams(store *state.Store, dev Device, maxStale time.Duration, logger *slog.Logger) {
+func (f *paramFlipper) applyIfDue(now time.Time) {
 	var applied awgparams.Params
 	var version uint64
 	var did bool // выставляется в fn только при реальном применении (Update гасит ErrNoChange в nil)
-	if _, err := store.Update(func(s *state.State) error {
-		if !mesh.PendingDue(s.Pending, time.Now().UTC(), maxStale) {
+	if _, err := f.store.Update(func(s *state.State) error {
+		if !mesh.ShouldFire(s.Pending, f.seenAtFor(s.Pending), now, f.abortMargin, f.maxStale) {
 			return state.ErrNoChange
 		}
 		applied, version, did = s.Pending.Params, s.Pending.Version, true
@@ -309,19 +371,29 @@ func applyDueParams(store *state.Store, dev Device, maxStale time.Duration, logg
 		s.Pending = nil
 		return nil
 	}); err != nil {
-		logger.Error("flip: persist params failed", "err", err)
+		f.log.Error("flip: persist params failed", "err", err)
 		return
 	}
 	if !did {
-		return // не пора / нет Pending
+		return // не пора / держим коммит недостаточно давно / нет Pending
 	}
-	if err := dev.ApplyParams(applied); err != nil {
+	if err := f.dev.ApplyParams(applied); err != nil {
 		// Слой откат/watchdog — отдельно; пока фиксируем. Связь восстановят
 		// рехендшейки, если остальные ноды применили тот же набор синхронно.
-		logger.Error("flip: apply params to device failed", "version", version, "err", err)
+		f.log.Error("flip: apply params to device failed", "version", version, "err", err)
 		return
 	}
-	logger.Info("flag-day params applied", "version", version)
+	f.log.Info("flag-day params applied", "version", version)
+}
+
+// seenAtFor — наше время первого наблюдения committed ApplyAt, но только если это та же
+// версия, что мы наблюдали (иначе нулевое: гонка observe↔Update, версия сменилась →
+// ShouldFire откажет, переснимем на следующем тике).
+func (f *paramFlipper) seenAtFor(p *state.PendingParams) time.Time {
+	if p == nil || f.seenVer != p.Version {
+		return time.Time{}
+	}
+	return f.seenAt
 }
 
 // runTombstoneReap периодически снимает отозванные ноды с device (см. reapRevoked).
@@ -390,15 +462,19 @@ func reapRevoked(store *state.Store, dev Device, logger *slog.Logger) {
 	}
 }
 
-// commitGraceCycles — на сколько gossip-циклов отодвигается ApplyAt от момента
-// commit. ApplyAt обязан РАЗОЙТИСЬ по gossip ДО применения, иначе ноды, не успевшие
-// его получить, не применят flip → рассинхрон. Истинная причина непропагации была в
-// ShouldAdoptPending (committed-Pending отвергался как «не новее»), а не в малом
-// grace; после её фикса 2 цикла хватает на распространение (+ окно maxStale сверху).
-const commitGraceCycles = 2
+// commitGraceCycles / abortMarginCycles — окна flag-day в gossip-циклах.
+// commitGrace — фора от commit до ApplyAt, за которую committed ApplyAt расходится по
+// gossip и собираются commit-ack'и. abortMargin — запас перед ApplyAt, до которого
+// seed решает abort, если не все подтвердили приём ApplyAt; за этот же запас переанонс
+// успевает дойти до committed-нод. Инвариант: commitGrace > abortMargin (нужен зазор,
+// чтобы было где собрать commit-ack'и до дедлайна abort'а).
+const (
+	commitGraceCycles = 4
+	abortMarginCycles = 2
+)
 
-// commitGraceFor — фора ApplyAt, привязанная к gossip-интервалу (commitGraceCycles
-// циклов), с нижней границей 30с для малых интервалов/тестов. См. commitGraceCycles.
+// commitGraceFor — фора ApplyAt в commitGraceCycles циклов, пол 30с для малых
+// интервалов/тестов. См. commitGraceCycles.
 func commitGraceFor(gossipInterval time.Duration) time.Duration {
 	if g := commitGraceCycles * gossipInterval; g > 30*time.Second {
 		return g
@@ -406,9 +482,25 @@ func commitGraceFor(gossipInterval time.Duration) time.Duration {
 	return 30 * time.Second
 }
 
-// runParamCommit (seed-only) назначает ApplyAt анонсированному Pending, когда
-// ВСЕ ноды подтвердили его приём. Завершается по ctx.
-func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Acks() map[string]uint64 }, selfPub string, interval, grace time.Duration, logger *slog.Logger) {
+// abortMarginFor — запас перед ApplyAt в abortMarginCycles циклов, пол 15с (< пола
+// commitGrace, чтобы инвариант commitGrace > abortMargin держался и на малых интервалах).
+func abortMarginFor(gossipInterval time.Duration) time.Duration {
+	if m := abortMarginCycles * gossipInterval; m > 15*time.Second {
+		return m
+	}
+	return 15 * time.Second
+}
+
+// paramAcker — источник обоих ack-каналов для seed-петли (его удовлетворяет gossip.Server).
+type paramAcker interface {
+	Acks() map[string]uint64       // announce-ack: видел анонс версии
+	CommitAcks() map[string]uint64 // commit-ack: держит committed ApplyAt версии
+}
+
+// runParamCommit (seed-only) на каждом тике: commit-гейт (назначить ApplyAt, когда все
+// подтвердили анонс) и arm/abort-гейт (отменить flip, если к дедлайну не все подтвердили
+// приём ApplyAt). Завершается по ctx.
+func runParamCommit(ctx context.Context, store *state.Store, acks paramAcker, selfPub string, interval, grace, abortMargin time.Duration, logger *slog.Logger) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -416,8 +508,40 @@ func runParamCommit(ctx context.Context, store *state.Store, acks interface{ Ack
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			now := time.Now().UTC()
 			commitIfAllAcked(store, acks.Acks(), selfPub, grace, logger)
+			abortIfStuck(store, acks.CommitAcks(), selfPub, abortMargin, now, logger)
 		}
+	}
+}
+
+// abortIfStuck (seed-only) отменяет застрявший committed flip: если к дедлайну
+// ApplyAt-abortMargin НЕ все подтвердили приём ApplyAt (commit-ack) — переанонсит те же
+// params как v+1 с ApplyAt=0. v+1 > v → все принимают (ShouldAdoptPending), сбрасывая
+// committed-v → flip v не делает НИКТО, сеть остаётся на старом наборе, цикл с начала.
+// Так медленную ноду не теряем: лучше не флипнуть совсем, чем флипнуть подмножество.
+func abortIfStuck(store *state.Store, commitAcks map[string]uint64, selfPub string, abortMargin time.Duration, now time.Time, logger *slog.Logger) {
+	var aborted *state.PendingParams
+	if _, err := store.Update(func(s *state.State) error {
+		p := s.Pending
+		if p == nil || p.ApplyAt.IsZero() {
+			return state.ErrNoChange // нет committed Pending — отменять нечего
+		}
+		armed := mesh.AllPeersAcked(s.Peers, selfPub, commitAcks, p.Version)
+		if !mesh.ShouldAbort(p, now, armed, abortMargin) {
+			return state.ErrNoChange // armed (все подтвердили) либо дедлайн ещё не настал
+		}
+		// Переанонс тех же params как строго новее (v+1) с ApplyAt=0 (announced).
+		s.Pending = mesh.NewPending(s.ParamsVersion, p, p.Params)
+		aborted = s.Pending
+		return nil
+	}); err != nil {
+		logger.Error("abort: persist failed", "err", err)
+		return
+	}
+	if aborted != nil {
+		logger.Warn("flag-day aborted — not all nodes acked the committed ApplyAt; re-announced",
+			"version", aborted.Version)
 	}
 }
 

@@ -119,6 +119,13 @@ func DefaultLocalObf() LocalObf {
 	return LocalObf{I1: DefaultI1}
 }
 
+// IsEmpty — у ноды не задан ни один из I1-I5 (нет initiator-обфускации). Так
+// выглядят мигрированные с v1 ноды: миграция оставляла local_obf пустым ради
+// wire-identical апгрейда. Демон backfill'ит таким DefaultLocalObf при старте.
+func (o LocalObf) IsEmpty() bool {
+	return o.I1 == "" && o.I2 == "" && o.I3 == "" && o.I4 == "" && o.I5 == ""
+}
+
 // Размеры стандартных WG-handshake-сообщений (amneziawg-go/device/noise-protocol.go:
 // MessageInitiationSize=148, MessageResponseSize=92). Нужны для S1/S2-констрейнта ниже.
 const (

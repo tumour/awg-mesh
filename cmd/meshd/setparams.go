@@ -38,9 +38,9 @@ func cmdSetParams(args []string) error {
 
 	var pending *state.PendingParams
 	if _, err := store.Update(func(st *state.State) error {
-		// Под локом, поверх свежей версии (gossip мог принять чужой Pending) —
-		// так остаёмся монотонными даже при гонке.
-		pending = mesh.NewPending(st.ParamsVersion, params)
+		// Под локом, поверх свежей версии И висящего Pending (gossip мог принять чужой
+		// Pending, либо flag-day уже в полёте) — так остаёмся строго монотонными.
+		pending = mesh.NewPending(st.ParamsVersion, st.Pending, params)
 		st.Pending = pending
 		return nil
 	}); err != nil {

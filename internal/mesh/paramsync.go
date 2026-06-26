@@ -69,13 +69,14 @@ func PendingDue(p *state.PendingParams, now time.Time, maxStale time.Duration) b
 	return now.Sub(p.ApplyAt) <= maxStale
 }
 
-// NewPending формирует анонс смены для seed: следующая версия, новые params,
-// ApplyAt НЕ назначен (нулевой) — момент применения проставит CommitPending,
-// когда все ноды подтвердят приём.
-func NewPending(currentVersion uint64, params awgparams.Params) *state.PendingParams {
+// NewPending формирует анонс смены для seed: версия = NextPendingVersion (строго
+// новее и применённой, и уже висящего Pending — повторный set-params поверх активного
+// flip остаётся монотонным), params новые, ApplyAt НЕ назначен (нулевой) — момент
+// применения проставит CommitPending, когда все ноды подтвердят приём.
+func NewPending(applied uint64, pending *state.PendingParams, params awgparams.Params) *state.PendingParams {
 	return &state.PendingParams{
 		Params:  params,
-		Version: currentVersion + 1,
+		Version: NextPendingVersion(applied, pending),
 		// ApplyAt намеренно нулевой: announced, not committed.
 	}
 }
@@ -106,4 +107,66 @@ func CommitPending(p *state.PendingParams, now time.Time, grace time.Duration) b
 	}
 	p.ApplyAt = now.Add(grace).UTC()
 	return true
+}
+
+// --- double-ack + abort: гарантия «никого не теряем» при flip ---
+//
+// Commit-гейт (AllPeersAcked по обычным ack'ам) доказывает лишь, что все получили
+// АНОНС. Дальше committed ApplyAt едет по gossip, и медленная нода может не успеть
+// его получить до flip → застрянет на старом наборе → изолируется. Решение: второй
+// ack — нода отдельно репортит, что держит уже COMMITTED ApplyAt (CommitAckVersion);
+// seed «вооружает» flip только когда все commit-acked, иначе ABORT (переанонс v+1)
+// до момента flip — тогда не флипает никто, сеть цела, ретрай.
+
+// AnnounceAckVersion — высшая версия, АНОНС которой нода видела (применённая или
+// принятый Pending любого состояния); репортится seed'у как announce-ack.
+func AnnounceAckVersion(s *state.State) uint64 {
+	v := s.ParamsVersion
+	if s.Pending != nil && s.Pending.Version > v {
+		v = s.Pending.Version
+	}
+	return v
+}
+
+// CommitAckVersion — версия, которую нода держит COMMITTED (или уже применила); её
+// она репортит seed'у как commit-ack. Анонс (ApplyAt=0) НЕ считается committed.
+func CommitAckVersion(s *state.State) uint64 {
+	cv := s.ParamsVersion
+	if s.Pending != nil && !s.Pending.ApplyAt.IsZero() && s.Pending.Version > cv {
+		cv = s.Pending.Version
+	}
+	return cv
+}
+
+// NextPendingVersion — версия следующего анонса: на 1 больше максимума из уже
+// применённой и текущего Pending. Учёт Pending нужен для abort'а — переанонс обязан
+// быть строго новее висящего Pending, иначе его не примут как «новее».
+func NextPendingVersion(applied uint64, pending *state.PendingParams) uint64 {
+	next := applied
+	if pending != nil && pending.Version > next {
+		next = pending.Version
+	}
+	return next + 1
+}
+
+// ShouldAbort — пора ли seed'у отменить застрявший flip. Abort только для committed
+// Pending (announced ещё ждёт ack'ов), у которого НЕ все подтвердили приём ApplyAt
+// (allCommitAcked=false) и настал дедлайн решения ApplyAt-abortMargin. abortMargin —
+// запас, чтобы переанонс успел дойти до уже-committed нод ДО их flip.
+func ShouldAbort(p *state.PendingParams, now time.Time, allCommitAcked bool, abortMargin time.Duration) bool {
+	if p == nil || p.ApplyAt.IsZero() || allCommitAcked {
+		return false
+	}
+	return !now.Before(p.ApplyAt.Add(-abortMargin))
+}
+
+// ShouldFire — флипать ли ноде в ApplyAt. Помимо due (PendingDue) требует, чтобы нода
+// держала committed ApplyAt не меньше abortMargin: seenAt — когда она впервые увидела
+// этот ApplyAt. Коммит, полученный впритык к ApplyAt (seenAt > ApplyAt-abortMargin),
+// не флипаем — возможен abort в полёте, который мы ещё не получили (анти-split).
+func ShouldFire(p *state.PendingParams, seenAt, now time.Time, abortMargin, maxStale time.Duration) bool {
+	if !PendingDue(p, now, maxStale) {
+		return false
+	}
+	return !seenAt.IsZero() && !seenAt.After(p.ApplyAt.Add(-abortMargin))
 }

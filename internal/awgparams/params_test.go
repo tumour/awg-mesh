@@ -2,6 +2,23 @@ package awgparams
 
 import "testing"
 
+// IsEmpty отличает ноду без I-обфускации (мигрированную) от настроенной — по нему
+// демон решает, backfill'ить ли DefaultLocalObf.
+func TestLocalObfIsEmpty(t *testing.T) {
+	if !(LocalObf{}).IsEmpty() {
+		t.Error("пустой LocalObf должен быть IsEmpty")
+	}
+	if (LocalObf{I1: "x"}).IsEmpty() {
+		t.Error("с заданным I1 — не пустой")
+	}
+	if (LocalObf{I3: "y"}).IsEmpty() {
+		t.Error("с заданным I3 — не пустой (проверяем не только I1)")
+	}
+	if DefaultLocalObf().IsEmpty() {
+		t.Error("DefaultLocalObf обязан быть не пустым (несёт I1)")
+	}
+}
+
 // amneziawg-go реджектит конфиг, если padded init и response одного размера
 // (wgInitMsgSize+S1 == wgResponseMsgSize+S2). ~0.43% случайных пар коллидируют,
 // поэтому 5000 прогонов без фикса почти наверняка поймали бы регресс (ожидание

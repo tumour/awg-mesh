@@ -22,7 +22,8 @@ type fakeDevice struct {
 	mu              sync.Mutex
 	name            string
 	configured      bool
-	configuredPeers []state.Peer // что ушло в Configure (для проверки startup-prune)
+	configuredObf   awgparams.LocalObf // что ушло в Configure (для проверки backfill I1)
+	configuredPeers []state.Peer       // что ушло в Configure (для проверки startup-prune)
 	appliedParams   bool
 	applyParamsErr  error    // инъекция: ошибка из ApplyParams (для error-ветки flip)
 	removePeerErr   error    // инъекция: ошибка из RemovePeer (для retry-ветки reap)
@@ -32,10 +33,11 @@ type fakeDevice struct {
 	closed          bool
 }
 
-func (f *fakeDevice) Configure(_ wgkey.Private, _ awgparams.Params, _ awgparams.LocalObf, peers []state.Peer, _ wgkey.Public) error {
+func (f *fakeDevice) Configure(_ wgkey.Private, _ awgparams.Params, lo awgparams.LocalObf, peers []state.Peer, _ wgkey.Public) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.configured = true
+	f.configuredObf = lo
 	f.configuredPeers = append([]state.Peer(nil), peers...)
 	return nil
 }
@@ -155,5 +157,71 @@ func TestRunOrchestratesDeviceAndLinker(t *testing.T) {
 	}
 	if !reflect.DeepEqual(lnk.ops, want) {
 		t.Errorf("linker ops\n  got:  %v\n  want: %v", lnk.ops, want)
+	}
+}
+
+// runOnce прогоняет Run с pre-cancelled ctx (вся синхронная настройка отрабатывает,
+// затем завершение) и возвращает Store + device для ассертов состояния.
+func runOnce(t *testing.T, st *state.State) (*state.Store, *fakeDevice) {
+	t.Helper()
+	priv, err := wgkey.GeneratePrivate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.PrivateKey = priv.String()
+	st.PublicKey = priv.Public().String()
+	if st.NetworkCIDR == "" {
+		st.NetworkCIDR = "100.64.0.0/24"
+	}
+	if st.NodeIP == "" {
+		st.NodeIP = "127.0.0.1"
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	dev := &fakeDevice{name: "awgtest0"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Run(ctx, Options{
+		StateFile:      path,
+		Interface:      "awg0",
+		GossipInterval: 0,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NewDevice:      func(string, int, int, int) (Device, error) { return dev, nil },
+		Linker:         &fakeLinker{},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return state.NewStore(path), dev
+}
+
+// Мигрированная нода с ПУСТЫМ local_obf обязана получить DefaultI1 при старте — и в
+// state, и на device. Без этого инициатор за DPI остаётся без QUIC-мимикрии.
+func TestRunBackfillsDefaultObfWhenEmpty(t *testing.T) {
+	params, _ := awgparams.Generate()
+	store, dev := runOnce(t, &state.State{NodeLabel: "t", AwgParams: params}) // LocalObf пуст
+
+	s, _ := store.Read()
+	if s.LocalObf.I1 != awgparams.DefaultI1 {
+		t.Fatalf("local_obf не backfill'ен в state: %+v", s.LocalObf)
+	}
+	if dev.configuredObf.I1 != awgparams.DefaultI1 {
+		t.Fatalf("device сконфигурён без I1: %+v", dev.configuredObf)
+	}
+}
+
+// Заданную вручную обфускацию backfill НЕ трогает (override под конкретный ISP важнее дефолта).
+func TestRunKeepsExistingObf(t *testing.T) {
+	params, _ := awgparams.Generate()
+	custom := awgparams.LocalObf{I1: "<b 0xdeadbeef><t>"}
+	store, dev := runOnce(t, &state.State{NodeLabel: "t", AwgParams: params, LocalObf: custom})
+
+	s, _ := store.Read()
+	if s.LocalObf != custom {
+		t.Fatalf("backfill затёр пользовательский obf: %+v", s.LocalObf)
+	}
+	if dev.configuredObf != custom {
+		t.Fatalf("device получил не пользовательский obf: %+v", dev.configuredObf)
 	}
 }

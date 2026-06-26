@@ -47,11 +47,15 @@ type Server struct {
 	srv   *http.Server
 	log   *slog.Logger
 
-	// acks — последняя версия params, о которой отрепортил каждый пир (по pubkey)
-	// в gossip-запросе (?node=&v=). Seed по ним решает, все ли получили Pending
-	// (mesh.AllPeersAcked) перед назначением ApplyAt. В памяти: ack'и эфемерны.
-	mu   sync.Mutex
-	acks map[string]uint64
+	// acks — announce-ack: высшая версия params, АНОНС которой видел каждый пир
+	// (?node=&v=). Seed по ним решает, все ли получили анонс (commit-гейт).
+	// commitAcks — commit-ack: высшая версия, для которой пир уже держит COMMITTED
+	// ApplyAt (?cv=). Seed по ним «вооружает» flip (arm-гейт) — без этого второго
+	// сигнала медленная нода, не получившая ApplyAt, застряла бы на старом наборе.
+	// В памяти: ack'и эфемерны (рестарт seed'а пересоберёт).
+	mu         sync.Mutex
+	acks       map[string]uint64
+	commitAcks map[string]uint64
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO
@@ -79,28 +83,46 @@ func NewServer(host string, port int, store *state.Store, logger *slog.Logger) *
 		logger = slog.Default()
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	return &Server{store: store, addr: addr, log: logger.With("component", "gossip"), acks: map[string]uint64{}}
+	return &Server{
+		store:      store,
+		addr:       addr,
+		log:        logger.With("component", "gossip"),
+		acks:       map[string]uint64{},
+		commitAcks: map[string]uint64{},
+	}
 }
 
-// recordAck монотонно запоминает версию, о которой сообщил пир (gossip-запрос).
-func (s *Server) recordAck(pubkey string, version uint64) {
+// recordAck монотонно запоминает announce-ack пира (видел анонс версии version).
+func (s *Server) recordAck(pubkey string, version uint64) { s.bumpAck(s.acks, pubkey, version) }
+
+// recordCommitAck монотонно запоминает commit-ack пира (держит committed ApplyAt версии).
+func (s *Server) recordCommitAck(pubkey string, version uint64) { s.bumpAck(s.commitAcks, pubkey, version) }
+
+// bumpAck монотонно поднимает версию пира в указанной мапе под локом (общим для
+// обоих ack-каналов). Пустой pubkey игнорируем.
+func (s *Server) bumpAck(m map[string]uint64, pubkey string, version uint64) {
 	if pubkey == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if version > s.acks[pubkey] {
-		s.acks[pubkey] = version
+	if version > m[pubkey] {
+		m[pubkey] = version
 	}
 }
 
-// Acks возвращает копию собранных ack'ов (pubkey → версия). Snapshot под локом,
-// чтобы seed-commit-loop читал без гонки. Пустая мапа, если репортов ещё не было.
-func (s *Server) Acks() map[string]uint64 {
+// Acks возвращает копию announce-ack'ов (pubkey → версия). Snapshot под локом.
+func (s *Server) Acks() map[string]uint64 { return s.snapshotAcks(s.acks) }
+
+// CommitAcks возвращает копию commit-ack'ов (pubkey → версия). Snapshot под локом.
+func (s *Server) CommitAcks() map[string]uint64 { return s.snapshotAcks(s.commitAcks) }
+
+// snapshotAcks копирует ack-мапу под локом, чтобы seed-commit-loop читал без гонки.
+func (s *Server) snapshotAcks(m map[string]uint64) map[string]uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]uint64, len(s.acks))
-	for k, v := range s.acks {
+	out := make(map[string]uint64, len(m))
+	for k, v := range m {
 		out[k] = v
 	}
 	return out
@@ -141,11 +163,16 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// ack: «пир node в курсе версий params до v». Trust-by-tunneling — внутри
-	// туннеля источник уже прошёл cluster-secret-проверку.
+	// ack: «пир node видел анонс до v» (announce-ack) и «держит committed ApplyAt
+	// до cv» (commit-ack). Trust-by-tunneling — источник уже прошёл cluster-secret.
+	// cv отсутствует у старого бинаря → commit-ack остаётся 0 (seed не armʼит) —
+	// безопасно в mixed-version раскатке.
 	if node := r.URL.Query().Get("node"); node != "" {
 		if v, err := strconv.ParseUint(r.URL.Query().Get("v"), 10, 64); err == nil {
 			s.recordAck(node, v)
+		}
+		if cv, err := strconv.ParseUint(r.URL.Query().Get("cv"), 10, 64); err == nil {
+			s.recordCommitAck(node, cv)
 		}
 	}
 	st, err := s.store.Read()

@@ -82,8 +82,9 @@ func TestPendingDue(t *testing.T) {
 
 func TestNewPending(t *testing.T) {
 	p, _ := awgparams.Generate()
-	pend := NewPending(7, p)
 
+	// Нет висящего Pending → версия applied+1.
+	pend := NewPending(7, nil, p)
 	if pend.Version != 8 {
 		t.Errorf("Version = %d, want 8", pend.Version)
 	}
@@ -98,6 +99,16 @@ func TestNewPending(t *testing.T) {
 	}
 	if PendingDue(pend, time.Now(), time.Minute) {
 		t.Error("announced Pending не должен быть due (нет ApplyAt)")
+	}
+
+	// Повторный set-params ПОВЕРХ висящего Pending v8 обязан дать v9 (строго новее),
+	// иначе его отвергнут как «не новее» и смена не разойдётся.
+	over := NewPending(7, pending(8), p)
+	if over.Version != 9 {
+		t.Errorf("NewPending поверх Pending v8: Version = %d, want 9", over.Version)
+	}
+	if !ShouldAdoptPending(7, pending(8), over) {
+		t.Error("анонс v9 должен приниматься поверх локального Pending v8")
 	}
 }
 
@@ -148,5 +159,135 @@ func TestCommitPending(t *testing.T) {
 	// Повторный commit не сдвигает уже назначенный ApplyAt.
 	if CommitPending(p, now.Add(time.Hour), time.Minute) {
 		t.Error("уже закоммиченный Pending не должен коммититься повторно")
+	}
+}
+
+// CommitAckVersion — что нода репортит как «версия, которую я держу COMMITTED или
+// применила». Анонс (ApplyAt=0) НЕ считается committed — иначе seed решил бы, что нода
+// готова флипать, когда она лишь получила анонс (исходный баг flint2).
+func TestCommitAckVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		s    *state.State
+		want uint64
+	}{
+		{"нет Pending — cv = применённая версия", &state.State{ParamsVersion: 3}, 3},
+		{"announced (ApplyAt=0) НЕ считается committed",
+			&state.State{ParamsVersion: 3, Pending: pending(4)}, 3},
+		{"committed новее применённой — cv = версия Pending",
+			&state.State{ParamsVersion: 3, Pending: committed(4)}, 4},
+		{"committed не новее применённой — cv = применённая (max)",
+			&state.State{ParamsVersion: 5, Pending: committed(4)}, 5},
+	}
+	for _, c := range cases {
+		if got := CommitAckVersion(c.s); got != c.want {
+			t.Errorf("%s: = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// AnnounceAckVersion — что нода репортит как «видела анонс до версии»: максимум из
+// применённой и любого Pending (в т.ч. announced, в отличие от CommitAckVersion).
+func TestAnnounceAckVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		s    *state.State
+		want uint64
+	}{
+		{"нет Pending — применённая", &state.State{ParamsVersion: 3}, 3},
+		{"announced считается (в отличие от commit-ack)",
+			&state.State{ParamsVersion: 3, Pending: pending(4)}, 4},
+		{"committed тоже считается", &state.State{ParamsVersion: 3, Pending: committed(5)}, 5},
+		{"Pending не новее применённой — применённая", &state.State{ParamsVersion: 6, Pending: pending(4)}, 6},
+	}
+	for _, c := range cases {
+		if got := AnnounceAckVersion(c.s); got != c.want {
+			t.Errorf("%s: = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// NextPendingVersion — версия следующего анонса. Должна расти и при ретрае поверх
+// уже висящего Pending (abort переанонсит v+1), иначе abort переиспользовал бы ту же
+// версию и не был бы принят как «строго новее».
+func TestNextPendingVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		applied uint64
+		pending *state.PendingParams
+		want    uint64
+	}{
+		{"нет Pending — applied+1", 7, nil, 8},
+		{"поверх анонса — pending.Version+1", 7, pending(8), 9},
+		{"поверх committed — pending.Version+1", 7, committed(8), 9},
+		{"вырожденный pending<=applied — applied+1", 7, pending(5), 8},
+	}
+	for _, c := range cases {
+		if got := NextPendingVersion(c.applied, c.pending); got != c.want {
+			t.Errorf("%s: = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// ShouldAbort — отменять ли застрявший flip. Abort только для committed Pending, у
+// которого НЕ все подтвердили приём ApplyAt И настал дедлайн решения (ApplyAt-margin).
+func TestShouldAbort(t *testing.T) {
+	t0 := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	const margin = 2 * time.Minute
+	c := &state.PendingParams{Version: 8, ApplyAt: t0} // committed на t0
+	cases := []struct {
+		name           string
+		p              *state.PendingParams
+		now            time.Time
+		allCommitAcked bool
+		want           bool
+	}{
+		{"nil — нечего абортить", nil, t0, false, false},
+		{"announced (ApplyAt=0) — нечего абортить", pending(8), t0, false, false},
+		{"armed (все commit-acked) — не абортим, летим", c, t0.Add(-time.Second), true, false},
+		{"до дедлайна (now < ApplyAt-margin) — рано", c, t0.Add(-3 * time.Minute), false, false},
+		{"ровно дедлайн (now = ApplyAt-margin), не armed — abort", c, t0.Add(-margin), false, true},
+		{"после дедлайна, не armed — abort", c, t0.Add(-time.Minute), false, true},
+	}
+	for _, cc := range cases {
+		if got := ShouldAbort(cc.p, cc.now, cc.allCommitAcked, margin); got != cc.want {
+			t.Errorf("%s: = %v, want %v", cc.name, got, cc.want)
+		}
+	}
+}
+
+// ShouldFire — флипать ли ноде в ApplyAt. Помимо due (PendingDue) требует, чтобы нода
+// ДЕРЖАЛА committed ApplyAt не меньше abortMargin (узнала вовремя — любой abort бы
+// дошёл). Коммит, полученный впритык к ApplyAt, не флипаем: возможен abort в полёте.
+func TestShouldFire(t *testing.T) {
+	t0 := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	const (
+		margin   = 2 * time.Minute
+		maxStale = 4 * time.Minute
+	)
+	c := &state.PendingParams{Version: 8, ApplyAt: t0}
+	early := t0.Add(-3 * time.Minute) // получили коммит за 3мин (> margin) до ApplyAt
+	late := t0.Add(-time.Minute)      // получили за 1мин (< margin) — впритык
+	cases := []struct {
+		name   string
+		p      *state.PendingParams
+		seenAt time.Time
+		now    time.Time
+		want   bool
+	}{
+		{"nil — нет", nil, early, t0, false},
+		{"announced — нет (не due)", pending(8), early, t0, false},
+		{"committed, держим давно, ровно ApplyAt — флип", c, early, t0, true},
+		{"committed, держим давно, чуть после ApplyAt — флип", c, early, t0.Add(time.Second), true},
+		{"committed, получили впритык (< margin) — НЕ флип (возможен abort)", c, late, t0, false},
+		{"committed, seenAt нулевой (не записали) — НЕ флип", c, time.Time{}, t0, false},
+		{"committed, ещё до ApplyAt — НЕ флип", c, early, t0.Add(-time.Second), false},
+		{"committed, протух (> maxStale) — НЕ флип даже если держим давно", c, early, t0.Add(5 * time.Minute), false},
+		{"committed, ровно граница margin (seenAt = ApplyAt-margin) — флип", c, t0.Add(-margin), t0, true},
+	}
+	for _, cc := range cases {
+		if got := ShouldFire(cc.p, cc.seenAt, cc.now, margin, maxStale); got != cc.want {
+			t.Errorf("%s: = %v, want %v", cc.name, got, cc.want)
+		}
 	}
 }
