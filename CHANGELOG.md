@@ -3,6 +3,36 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.6.1] — 2026-06-26
+
+Удаление ноды из mesh — **revoke** (seed отзывает ноду) и **leave** (нода уходит
+сама). Раньше забыть ноду было нельзя: gossip — union, вычеркнутый peer возвращался
+следующим pull'ом; orphan-запись держала mesh-IP и блокировала flag-day-commit
+(ack от мёртвого pubkey не приходит никогда → `set-params` не применился бы).
+
+### Added
+- **`meshd revoke <mesh-ip|pubkey>` (seed)** — отзывает ноду перманентным
+  tombstone по её pubkey. Раздаётся по gossip; каждая нода снимает отозванного с
+  wg-device **на лету (`RemovePeer`, без рестарта демона)** и перекрывает его
+  реанонс. Подтверждение печатает точную идентичность (защита от дублей label).
+- **`meshd leave`** — чистый выход: нода объявляет свой tombstone и пушит его
+  endpoint-пирам (`POST /v1/tombstone`), т.к. за NAT её никто не пуллит
+  (pull-gossip однонаправлен). Best-effort: если push не дошёл — ноду уберёт
+  seed-side `revoke`.
+- **Tombstone** в `state` (перманентный по pubkey, `omitempty`), раздаётся через
+  gossip-ответ `/v1/peers` и bootstrap-`HelloResponse`. Доменное ядро —
+  `internal/mesh/tombstone.go` (чистые `MergeTombstones`/`IsRevoked`/`ApplyTombstones`).
+  Реанонс перекрыт в `MergePeers`, re-join отозванного отклоняется в `RegisterPeer`.
+
+### Note
+- Схема state НЕ бампится (tombstones — аддитивное `omitempty`-поле, version
+  остаётся 2): откат self-upgrade на предыдущий бинарь стартует чисто — версии
+  совпадают, поле просто игнорируется (watchdog-safety для нод без out-of-band).
+- Tombstone принимается без подписи (trust-by-tunneling, как `Pending`/`set-params`) —
+  рассчитано на mesh из доверенных нод. Подпись отзыва (неподделываемость инсайдером) —
+  отдельный security-эпик перед раздачей на недоверенные узлы. Вернуть отозванную
+  ноду можно только re-join'ом с НОВЫМ keypair (старый pubkey мёртв навсегда).
+
 ## [0.6.0] — 2026-06-26
 
 Flag-day-смена сетевых AWG-params (S3/S4/H-диапазоны) на ЖИВОЙ сети — без
@@ -275,6 +305,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.6.1]: https://github.com/tumour/awg-mesh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/tumour/awg-mesh/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tumour/awg-mesh/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/tumour/awg-mesh/compare/v0.4.2...v0.4.3
