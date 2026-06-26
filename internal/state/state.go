@@ -66,6 +66,14 @@ type State struct {
 	// Известные peer'ы (через gossip / bootstrap-response)
 	Peers []Peer `json:"peers"`
 
+	// Отозванные ноды (revoke/leave) — перманентные tombstone по pubkey. Раздаются
+	// через gossip union'ом, как peers; защищают peer-list от реанонса удалённой
+	// ноды (union-merge иначе воскрешает её) и снимают её с wg-device на лету.
+	// Доменные решения (merge, перекрытие реанонса, применение) — в internal/mesh
+	// tombstone.go. omitempty: пустой набор не пишется → старый бинарь (без поля)
+	// читает state как раньше и не падает (откат self-upgrade безопасен).
+	Tombstones []Tombstone `json:"tombstones,omitempty"` // nil/пусто = никого не отзывали
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -89,6 +97,19 @@ type Peer struct {
 	NodeIP    string    `json:"node_ip"`    // mesh-IP
 	IsSeed    bool      `json:"is_seed"`
 	LastSeen  time.Time `json:"last_seen,omitempty"`
+}
+
+// Tombstone — отзыв ноды из mesh (revoke seed'ом / leave самой нодой). Помнится
+// ПЕРМАНЕНТНО по pubkey: отозванный ключ мёртв навсегда, вернуть ноду = re-join с
+// НОВЫМ keypair (новый pubkey не под tombstone). Перманентность даёт идемпотентность
+// merge'а (повторный приём — no-op) и снимает необходимость анти-replay / un-revoke.
+// Распространяется через gossip union'ом, как peers; приняв новый tombstone, нода
+// снимает peer'а с wg-device на лету (RemovePeer) и убирает из Peers. Доменные
+// решения — в internal/mesh tombstone.go, тут только данные.
+type Tombstone struct {
+	PublicKey string    `json:"public_key"` // base64 WG-encoded — кого отозвали
+	Label     string    `json:"label"`      // метка на момент отзыва, для аудита/лога
+	RevokedAt time.Time `json:"revoked_at"` // UTC, когда отозвали
 }
 
 // Load читает state.json. Возвращает ErrNotInitialized если файла нет —

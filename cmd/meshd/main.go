@@ -44,6 +44,10 @@ func main() {
 		err = cmdToken(args)
 	case "set-params":
 		err = cmdSetParams(args)
+	case "revoke":
+		err = cmdRevoke(args)
+	case "leave":
+		err = cmdLeave(args)
 	case "self-upgrade":
 		err = cmdSelfUpgrade(args)
 	case "__watchdog":
@@ -75,6 +79,8 @@ Commands:
   status        Print current state and peer info
   token         Re-print the join-token from existing state (for onboarding nodes)
   set-params    (seed) Schedule a network-wide AWG-2.0 params flag-day (S3/S4/H ranges)
+  revoke        (seed) Revoke a node by mesh-IP or pubkey (permanent tombstone, gossiped)
+  leave         Leave the mesh cleanly: announce own tombstone, then bring the node down
   self-upgrade  Replace the binary with a new one, auto-rollback on lost mesh connectivity
   version       Print version
 

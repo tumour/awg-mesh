@@ -128,6 +128,7 @@ func Join(p JoinParams) (JoinResult, error) {
 		ListenPort:    ownPort,
 		IsSeed:        false,
 		Peers:         peers,
+		Tombstones:    resp.Tombstones, // отозванные от seed'а — сразу консистентны
 	}
 
 	if existing != nil {

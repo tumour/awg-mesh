@@ -30,6 +30,21 @@ func TestRegisterPeerNew(t *testing.T) {
 	}
 }
 
+// Отозванную ноду нельзя вернуть re-join'ом с тем же ключом — иначе revoke
+// обходился бы через bootstrap в обход gossip-перекрытия.
+func TestRegisterPeerRevokedRejected(t *testing.T) {
+	s := newSeedState()
+	s.Tombstones = []state.Tombstone{{PublicKey: "N1", Label: "n1"}}
+
+	_, err := RegisterPeer(s, JoinRequest{Label: "n1", PublicKey: "N1", Endpoint: "1.2.3.4:51820"})
+	if err == nil {
+		t.Fatal("re-join отозванной ноды должен быть отклонён")
+	}
+	if len(s.Peers) != 1 { // только seed, отозванный не добавлен
+		t.Fatalf("отозванный не должен попасть в peers: %+v", s.Peers)
+	}
+}
+
 func TestRegisterPeerRejoinNoChange(t *testing.T) {
 	s := newSeedState()
 	s.Peers = append(s.Peers, state.Peer{Label: "n1", PublicKey: "N1", NodeIP: "100.64.0.2", Endpoint: "1.2.3.4:51820"})

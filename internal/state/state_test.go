@@ -1,8 +1,10 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +69,61 @@ func TestSaveLoadV2RoundTrip(t *testing.T) {
 	if out.Pending.Version != in.Pending.Version || !out.Pending.ApplyAt.Equal(in.Pending.ApplyAt) ||
 		out.Pending.Params != in.Pending.Params {
 		t.Errorf("Pending mismatch:\n got %+v\nwant %+v", out.Pending, in.Pending)
+	}
+}
+
+// TestTombstonesRoundTrip — отзывы (revoke/leave) переживают сериализацию; пустой
+// набор не пишется (omitempty), а файл с tombstones остаётся version 2 и читается
+// «старым» парсером без падения. Это watchdog-safety: откат self-upgrade на бинарь
+// без поля tombstones стартует чисто (version совпадает, поле просто игнорится).
+func TestTombstonesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	in := &State{
+		NodeLabel:   "seed",
+		NetworkCIDR: "100.64.0.0/24",
+		NodeIP:      "100.64.0.1",
+		IsSeed:      true,
+		Tombstones: []Tombstone{
+			{PublicKey: "ORPH", Label: "orphan", RevokedAt: time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)},
+		},
+	}
+	if err := in.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(out.Tombstones) != 1 || out.Tombstones[0].PublicKey != "ORPH" {
+		t.Fatalf("tombstones lost: %+v", out.Tombstones)
+	}
+	if !out.Tombstones[0].RevokedAt.Equal(in.Tombstones[0].RevokedAt) {
+		t.Errorf("RevokedAt mismatch: %v", out.Tombstones[0].RevokedAt)
+	}
+
+	// Файл остаётся version 2 → откат на старый бинарь (CurrentVersion=2) его не реджектит.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatalf("«старый» парсер не смог прочитать файл с tombstones: %v", err)
+	}
+	if legacy.Version != 2 {
+		t.Errorf("version = %d, want 2 (tombstones — аддитивное поле, без bump)", legacy.Version)
+	}
+
+	// omitempty: state без tombstones поле не пишет — старый бинарь видит файл как раньше.
+	empty := &State{NetworkCIDR: "100.64.0.0/24", NodeIP: "100.64.0.1"}
+	if err := empty.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	if strings.Contains(string(raw), "tombstones") {
+		t.Errorf("пустой набор tombstones не должен попадать в JSON (omitempty):\n%s", raw)
 	}
 }
 

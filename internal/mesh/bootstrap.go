@@ -32,6 +32,13 @@ type Registration struct {
 func RegisterPeer(s *state.State, req JoinRequest) (Registration, error) {
 	now := time.Now().UTC()
 
+	// Отозванную ноду (revoke/leave) не пускаем обратно даже через bootstrap-rejoin —
+	// иначе revoke обходился бы повторным join'ом с тем же ключом. Вернуться в mesh
+	// можно только с НОВЫМ keypair (новый pubkey не под tombstone).
+	if IsRevoked(s.Tombstones, req.PublicKey) {
+		return Registration{}, fmt.Errorf("peer %s revoked", ShortKey(req.PublicKey))
+	}
+
 	for i, p := range s.Peers {
 		if p.PublicKey != req.PublicKey {
 			continue

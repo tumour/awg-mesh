@@ -18,7 +18,7 @@ func TestMergeAddsNewPeerAndFiltersSelf(t *testing.T) {
 		{Label: "new", PublicKey: "NEW", Endpoint: "1.2.3.4:51820", NodeIP: "100.64.0.3"},
 	}
 
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(rejected) != 0 {
 		t.Fatalf("no rejections expected, got %v", rejected)
 	}
@@ -45,7 +45,7 @@ func TestMergeEndpointUpdatePushedToDevice(t *testing.T) {
 		{Label: "b", PublicKey: "B", Endpoint: "new.host:2", NodeIP: "100.64.0.3"},
 	}
 
-	merged, changed, _, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 1 || changed[0].Endpoint != "new.host:2" {
 		t.Fatalf("endpoint change must land in changed, got %+v", changed)
 	}
@@ -64,7 +64,7 @@ func TestMergeEmptyRemoteEndpointDoesNotErase(t *testing.T) {
 		{Label: "b", PublicKey: "B", Endpoint: "", NodeIP: "100.64.0.3"},
 	}
 
-	merged, changed, _, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 0 {
 		t.Fatalf("nothing to push, got %+v", changed)
 	}
@@ -87,7 +87,7 @@ func TestMergeLabelChangeNotPushedButPersisted(t *testing.T) {
 		{Label: "new-name", PublicKey: "B", Endpoint: "h:1", NodeIP: "100.64.0.3"},
 	}
 
-	merged, changed, _, persist := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, persist := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if merged[0].Label != "new-name" {
 		t.Fatalf("label not merged: %+v", merged[0])
 	}
@@ -107,7 +107,7 @@ func TestMergeIsSeedChangePersisted(t *testing.T) {
 	remote := []state.Peer{
 		{PublicKey: "B", Endpoint: "h:1", NodeIP: "100.64.0.3", IsSeed: true},
 	}
-	merged, changed, _, persist := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, persist := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if !merged[0].IsSeed {
 		t.Fatalf("IsSeed not merged: %+v", merged[0])
 	}
@@ -128,7 +128,7 @@ func TestMergePureLastSeenRefreshNotPersisted(t *testing.T) {
 	remote := []state.Peer{ // те же label/endpoint/IsSeed — меняется только LastSeen
 		{Label: "b", PublicKey: "B", Endpoint: "h:1", NodeIP: "100.64.0.3"},
 	}
-	_, changed, _, persist := MergePeers(local, remote, selfKey, testCIDR)
+	_, changed, _, persist := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 0 {
 		t.Fatalf("nothing to push, got %+v", changed)
 	}
@@ -144,7 +144,7 @@ func TestMergeDeduplicatesRemoteDuplicates(t *testing.T) {
 		{Label: "new", PublicKey: "NEW", NodeIP: "100.64.0.3", Endpoint: "h:1"},
 		{Label: "new-dup", PublicKey: "NEW", NodeIP: "100.64.0.3", Endpoint: "h:1"},
 	}
-	merged, changed, _, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	cnt := 0
 	for _, p := range merged {
 		if p.PublicKey == "NEW" {
@@ -165,7 +165,7 @@ func TestMergeKeepsLocalUnknownToRemote(t *testing.T) {
 	}
 	remote := []state.Peer{} // remote про C не знает
 
-	merged, changed, _, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(merged) != 1 || merged[0].PublicKey != "C" {
 		t.Fatalf("local peer dropped: %+v", merged)
 	}
@@ -174,6 +174,78 @@ func TestMergeKeepsLocalUnknownToRemote(t *testing.T) {
 	}
 	if len(changed) != 0 {
 		t.Fatalf("nothing changed, got %+v", changed)
+	}
+}
+
+// --- revoke: tombstone исключает ноду из merge (см. tombstone.go) ---
+
+// Отозванный peer, ещё живущий в local, выкидывается из merged и помечается на
+// запись (persist) — на wg-device его снимет RemovePeer у caller'а.
+func TestMergeRevokedPeerDroppedFromLocal(t *testing.T) {
+	local := []state.Peer{
+		{PublicKey: selfKey, NodeIP: "100.64.0.1"},
+		{Label: "orphan", PublicKey: "ORPH", NodeIP: "100.64.0.4", Endpoint: "h:1"},
+	}
+	remote := []state.Peer{
+		{Label: "orphan", PublicKey: "ORPH", NodeIP: "100.64.0.4", Endpoint: "h:1"},
+	}
+	tomb := []state.Tombstone{{PublicKey: "ORPH"}}
+
+	merged, changed, _, persist := MergePeers(local, remote, tomb, selfKey, testCIDR)
+	for _, p := range merged {
+		if p.PublicKey == "ORPH" {
+			t.Fatal("отозванный peer не должен оставаться в merged")
+		}
+	}
+	if len(changed) != 0 {
+		t.Fatalf("отозванного нельзя пушить в device, got %+v", changed)
+	}
+	if !persist {
+		t.Fatal("удаление отозванного из local ОБЯЗАНО persist=true")
+	}
+}
+
+// Перекрытие реанонса: сосед прислал отозванного как «нового» — НЕ воскрешаем.
+func TestMergeRevokedPeerNotReanimatedFromRemote(t *testing.T) {
+	local := []state.Peer{{PublicKey: selfKey, NodeIP: "100.64.0.1"}}
+	remote := []state.Peer{
+		{Label: "orphan", PublicKey: "ORPH", NodeIP: "100.64.0.4", Endpoint: "h:1"},
+	}
+	tomb := []state.Tombstone{{PublicKey: "ORPH"}}
+
+	merged, changed, rejected, _ := MergePeers(local, remote, tomb, selfKey, testCIDR)
+	for _, p := range merged {
+		if p.PublicKey == "ORPH" {
+			t.Fatal("реанонс отозванного должен блокироваться")
+		}
+	}
+	if len(changed) != 0 {
+		t.Fatalf("реанонс не должен доходить до device, got %+v", changed)
+	}
+	if len(rejected) != 1 {
+		t.Fatalf("want 1 rejection (revoked), got %v", rejected)
+	}
+}
+
+// Security: форж tombstone на НАШ собственный pubkey не должен выкидывать нас из
+// своего же peer-list (иначе злой сосед «убивал» бы нас по сети одним tombstone).
+// self обрабатывается ДО revoke-проверки — этот тест страхует тот порядок.
+func TestMergeSelfSurvivesOwnTombstone(t *testing.T) {
+	local := []state.Peer{
+		{PublicKey: selfKey, NodeIP: "100.64.0.1"},
+		{Label: "b", PublicKey: "B", NodeIP: "100.64.0.3", Endpoint: "h:1"},
+	}
+	tomb := []state.Tombstone{{PublicKey: selfKey}} // форж на себя
+
+	merged, _, _, _ := MergePeers(local, nil, tomb, selfKey, testCIDR)
+	found := false
+	for _, p := range merged {
+		if p.PublicKey == selfKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("self под форженным tombstone должен ОСТАТЬСЯ в merged")
 	}
 }
 
@@ -209,7 +281,7 @@ func TestMergeRejectsIPHijack(t *testing.T) {
 	remote := []state.Peer{
 		{Label: "evil", PublicKey: "EVIL", NodeIP: "100.64.0.3", Endpoint: "evil.host:51820"},
 	}
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	for _, p := range merged {
 		if p.PublicKey == "EVIL" {
 			t.Fatal("EVIL peer hijacking 100.64.0.3 must not be merged")
@@ -228,7 +300,7 @@ func TestMergeRejectsOutOfCIDR(t *testing.T) {
 	// node_ip вне mesh-CIDR → попытка угнать маршрут к внешнему адресу (8.8.8.8).
 	remote := []state.Peer{{Label: "x", PublicKey: "X", NodeIP: "8.8.8.8", Endpoint: "x.host:1"}}
 
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 0 || len(rejected) != 1 {
 		t.Fatalf("out-of-cidr peer must be rejected: changed=%+v rejected=%v", changed, rejected)
 	}
@@ -245,7 +317,7 @@ func TestMergeRejectsInvalidNodeIP(t *testing.T) {
 		{Label: "noip", PublicKey: "N", NodeIP: ""},
 		{Label: "bad", PublicKey: "M", NodeIP: "not-an-ip"},
 	}
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 0 {
 		t.Fatalf("invalid-IP peers must not be pushed, got %+v", changed)
 	}
@@ -264,7 +336,7 @@ func TestMergeNewPeerInvalidEndpointNulled(t *testing.T) {
 	remote := []state.Peer{
 		{Label: "n", PublicKey: "N", NodeIP: "100.64.0.7", Endpoint: "garbage-no-port"},
 	}
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 1 || changed[0].PublicKey != "N" {
 		t.Fatalf("peer with valid IP must still be added, got changed=%+v", changed)
 	}
@@ -290,7 +362,7 @@ func TestMergeRejectsInvalidEndpointFormat(t *testing.T) {
 	remote := []state.Peer{
 		{Label: "b", PublicKey: "B", NodeIP: "100.64.0.3", Endpoint: "no-port-here"},
 	}
-	merged, changed, rejected, _ := MergePeers(local, remote, selfKey, testCIDR)
+	merged, changed, rejected, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
 	if len(changed) != 0 {
 		t.Fatalf("garbage endpoint must not reach device, got %+v", changed)
 	}

@@ -51,6 +51,8 @@ func startSeed(t *testing.T) (addr string, psk []byte, seedPub wgkey.Public) {
 		Peers: []state.Peer{
 			{Label: "seed", PublicKey: seedPub.String(), NodeIP: "100.64.0.1", IsSeed: true, Endpoint: "1.2.3.4:51820"},
 		},
+		// Отозванная нода — новичок должен получить её tombstone в HelloResponse.
+		Tombstones: []state.Tombstone{{PublicKey: "GONEPUB", Label: "gone"}},
 	}
 	if err := st.Save(path); err != nil {
 		t.Fatalf("save state: %v", err)
@@ -104,6 +106,32 @@ func TestBootstrapHonestJoin(t *testing.T) {
 	}
 	if resp.YourIP == "" {
 		t.Fatal("seed did not assign an IP")
+	}
+}
+
+// HelloResponse несёт tombstones — новичок при join сразу получает список отозванных
+// (иначе подхватил бы отозванного peer'а от отстающей ноды в переходном окне).
+// node.Join кладёт resp.Tombstones в свой state.
+func TestBootstrapJoinReceivesTombstones(t *testing.T) {
+	addr, psk, seedPub := startSeed(t)
+
+	cPriv, cPub := genKey(t)
+	resp, err := Join(addr, psk, cPriv, cPub, seedPub[:], proto.HelloRequest{
+		Version:   proto.ProtoVersion,
+		Label:     "client",
+		PublicKey: cPub.String(),
+	})
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	found := false
+	for _, ts := range resp.Tombstones {
+		if ts.PublicKey == "GONEPUB" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("HelloResponse должен нести tombstones seed'а, got %+v", resp.Tombstones)
 	}
 }
 

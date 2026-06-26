@@ -39,8 +39,12 @@ import (
 // бы /32 атакующему). NodeIP существующих peer'ов через gossip не меняется
 // (матчим по pubkey), поэтому угон возможен только через «нового» peer'а.
 //
-// Себя из remote всегда отфильтровываем (selfPub); себя из local сохраняем как
-// есть. Удаление peer'ов (revoke/tombstone) — v0.2, сейчас union-with-update.
+// Себя из remote всегда отфильтровываем (selfPub); себя из local сохраняем как есть.
+//
+// REVOKE (tombstones, см. tombstone.go): отозванные ноды исключаются из merge —
+// и из local (выкидываем из merged, persist=true; на wg-device их снимет RemovePeer
+// у caller'а), и из remote (НЕ воскрешаем union'ом). Это и есть перекрытие реанонса:
+// без него удалить ноду нельзя — сосед вернул бы её следующим gossip-pull'ом.
 //
 // Честность LastSeen: refresh означает «remote-нода знает этого peer'а», а НЕ
 // «peer жив» — прямого health-check'а нет. Не строить на этом expiry-логику.
@@ -49,7 +53,7 @@ import (
 // peer'а. MergePeers применяет смену endpoint'а от любого источника (last-pull-wins),
 // поэтому злая нода может перенаправить трафик к соседу в никуда (DoS). Здесь
 // валидируется только ФОРМАТ endpoint'а, не его подлинность.
-func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged, changed []state.Peer, rejected []string, persist bool) {
+func MergePeers(local, remote []state.Peer, tombstones []state.Tombstone, selfPub, networkCIDR string) (merged, changed []state.Peer, rejected []string, persist bool) {
 	// Индекс remote по pubkey, заодно отфильтровываем себя.
 	rByKey := make(map[string]state.Peer, len(remote))
 	for _, r := range remote {
@@ -81,6 +85,13 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 		localKeys[p.PublicKey] = true
 		if p.PublicKey == selfPub {
 			merged = append(merged, p)
+			continue
+		}
+		// Отозванного выкидываем из peer-list (на wg-device его снимет RemovePeer у
+		// caller'а). localKeys помечен выше — значит как «новый» из remote он тоже не
+		// вернётся. persist: merged изменился относительно local — надо записать диск.
+		if IsRevoked(tombstones, p.PublicKey) {
+			persist = true
 			continue
 		}
 		r, ok := rByKey[p.PublicKey]
@@ -127,6 +138,11 @@ func MergePeers(local, remote []state.Peer, selfPub, networkCIDR string) (merged
 	seenNew := make(map[string]bool)
 	for _, r := range remote {
 		if r.PublicKey == selfPub || localKeys[r.PublicKey] || seenNew[r.PublicKey] {
+			continue
+		}
+		// Перекрытие реанонса: отозванного соседа НЕ воскрешаем union'ом.
+		if IsRevoked(tombstones, r.PublicKey) {
+			rejected = append(rejected, fmt.Sprintf("peer %s: revoked, reanimation blocked", ShortKey(r.PublicKey)))
 			continue
 		}
 		if reason := rejectNewPeer(r, ipOwner, cidr, networkCIDR); reason != "" {

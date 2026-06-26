@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
 )
@@ -58,11 +59,17 @@ type Server struct {
 // раздают запланированную flag-day-смену сетевых params: получатель принимает
 // строго более новый Pending (mesh.ShouldAdoptPending) и применит его синхронно
 // в ApplyAt. PendingParams сериализуется как есть (domain-тип, JSON-готов).
+//
+// Tombstones — отозванные ноды (revoke/leave). Раздаются union'ом, как peers;
+// получатель мерджит их (mesh.MergeTombstones), снимает отозванных с wg-device и
+// перекрывает их реанонс. omitempty: пустой набор не пишется на провод — старый
+// бинарь (без поля) поймёт ответ как раньше (совместимость во время self-upgrade).
 type PeersResponse struct {
 	Peers         []proto.PeerInfo     `json:"peers"`
 	UpdatedAt     time.Time            `json:"updated_at"`
 	ParamsVersion uint64               `json:"params_version"`
 	Pending       *state.PendingParams `json:"pending_params,omitempty"`
+	Tombstones    []state.Tombstone    `json:"tombstones,omitempty"`
 }
 
 // NewServer создаёт сервер на mesh-IP:port. host обычно = state.NodeIP.
@@ -103,6 +110,7 @@ func (s *Server) Acks() map[string]uint64 {
 func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/peers", s.handlePeers)
+	mux.HandleFunc("/v1/tombstone", s.handleTombstone)
 
 	s.srv = &http.Server{
 		Addr:              s.addr,
@@ -152,6 +160,7 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:     st.UpdatedAt,
 		ParamsVersion: st.ParamsVersion,
 		Pending:       st.Pending,
+		Tombstones:    st.Tombstones,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -160,4 +169,78 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		// битого ответа фиксируем у себя.
 		s.log.Warn("encode peers response failed", "err", err)
 	}
+}
+
+// maxTombstoneBody — лимит тела POST /v1/tombstone. Tombstone — это pubkey + короткий
+// label + время; 4 КиБ с запасом, чтобы инсайдер не флудил гигантскими телами (DoS
+// на память роутера).
+const maxTombstoneBody = 4 << 10
+
+// handleTombstone принимает отзыв, запушенный уходящей нодой (meshd leave). Нода
+// под NAT не дождётся pull (её никто не пуллит, см. mesh.GossipCandidates), поэтому
+// сама пушит свой tombstone endpoint-пирам. Кладём его в state union'ом — дальше он
+// разойдётся обычным pull-gossip'ом, а демон снимет ушедшего с device в своём цикле.
+//
+// Принимаем ТОЛЬКО self-leave: pushed pubkey должен принадлежать ноде, с чьего
+// mesh-IP пришёл запрос. Иначе один POST изнутри туннеля перманентно отзывал бы
+// любую ноду (включая seed) — отзыв без отката. Отзыв ДРУГИХ нод — прерогатива seed
+// через state+gossip (meshd revoke), не через этот эндпоинт.
+func (s *Server) handleTombstone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var ts state.Tombstone
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTombstoneBody)).Decode(&ts); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if ts.PublicKey == "" {
+		http.Error(w, "empty pubkey", http.StatusBadRequest)
+		return
+	}
+	st, err := s.store.Read()
+	if err != nil {
+		s.log.Error("load state failed", "err", err)
+		http.Error(w, "state unavailable", http.StatusInternalServerError)
+		return
+	}
+	srcIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !selfLeaveAuthorized(st.Peers, srcIP, ts.PublicKey) {
+		s.log.Warn("rejected foreign leave-push", "src", srcIP, "pubkey", mesh.ShortKey(ts.PublicKey))
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if _, err := s.store.Update(func(st *state.State) error {
+		merged, added := mesh.MergeTombstones(st.Tombstones, []state.Tombstone{ts})
+		if len(added) == 0 {
+			return state.ErrNoChange // уже знаем этот отзыв — идемпотентно
+		}
+		st.Tombstones = merged
+		return nil
+	}); err != nil {
+		s.log.Error("apply pushed tombstone failed", "err", err)
+		http.Error(w, "state error", http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("tombstone received via leave-push", "pubkey", mesh.ShortKey(ts.PublicKey), "label", ts.Label)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// selfLeaveAuthorized — pushed tombstone легитимен, только если его pubkey
+// принадлежит peer'у, чей mesh-IP = источник запроса (нода объявляет САМА СЕБЯ).
+// Требуем совпадения И NodeIP, И pubkey у ОДНОГО peer (не first-match-then-compare):
+// если бы два peer делили один mesh-IP (нарушение инварианта ip-hijack из MergePeers),
+// first-match отверг бы легитимный self второго или авторизовал чужой отзыв.
+// Пустой/неизвестный srcIP, или pubkey не того узла → отказ (fail-closed).
+func selfLeaveAuthorized(peers []state.Peer, srcIP, pubkey string) bool {
+	if srcIP == "" {
+		return false
+	}
+	for _, p := range peers {
+		if p.NodeIP == srcIP && p.PublicKey == pubkey {
+			return true
+		}
+	}
+	return false
 }

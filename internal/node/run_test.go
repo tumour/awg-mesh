@@ -14,28 +14,69 @@ import (
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
-// fakeDevice — node.Device без реального TUN.
+// fakeDevice — node.Device без реального TUN. Трекинг configured/updated/removed
+// нужен, чтобы тесты ловили перепутанные callback'и (onNewPeers↔onRemovedPeers) и
+// проверяли, что revoke реально снимает peer с device. Методы потокобезопасны:
+// reap-loop и pushPeers могут трогать device из разных goroutine.
 type fakeDevice struct {
-	name       string
-	configured     bool
-	appliedParams  bool
-	applyParamsErr error // инъекция: ошибка из ApplyParams (для error-ветки flip)
-	upped          bool
-	closed         bool
+	mu              sync.Mutex
+	name            string
+	configured      bool
+	configuredPeers []state.Peer // что ушло в Configure (для проверки startup-prune)
+	appliedParams   bool
+	applyParamsErr  error    // инъекция: ошибка из ApplyParams (для error-ветки flip)
+	removePeerErr   error    // инъекция: ошибка из RemovePeer (для retry-ветки reap)
+	updated         []string // pubkeys через UpdatePeer
+	removed         []string // pubkeys через RemovePeer
+	upped           bool
+	closed          bool
 }
 
-func (f *fakeDevice) Configure(wgkey.Private, awgparams.Params, awgparams.LocalObf, []state.Peer, wgkey.Public) error {
+func (f *fakeDevice) Configure(_ wgkey.Private, _ awgparams.Params, _ awgparams.LocalObf, peers []state.Peer, _ wgkey.Public) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.configured = true
+	f.configuredPeers = append([]state.Peer(nil), peers...)
 	return nil
 }
 func (f *fakeDevice) ApplyParams(awgparams.Params) error {
 	f.appliedParams = true
 	return f.applyParamsErr
 }
-func (f *fakeDevice) UpdatePeer(state.Peer) error        { return nil }
-func (f *fakeDevice) Up() error                   { f.upped = true; return nil }
-func (f *fakeDevice) Name() string                { return f.name }
-func (f *fakeDevice) Close()                      { f.closed = true }
+func (f *fakeDevice) UpdatePeer(p state.Peer) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.updated = append(f.updated, p.PublicKey)
+	return nil
+}
+func (f *fakeDevice) RemovePeer(pubkey string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.removePeerErr != nil {
+		return f.removePeerErr // снятие провалилось — НЕ трекаем как снятого
+	}
+	f.removed = append(f.removed, pubkey)
+	return nil
+}
+func (f *fakeDevice) Up() error    { f.upped = true; return nil }
+func (f *fakeDevice) Name() string { return f.name }
+func (f *fakeDevice) Close()       { f.closed = true }
+
+// removedKeys / configuredKeys — снимок под локом для ассертов.
+func (f *fakeDevice) removedKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removed...)
+}
+func (f *fakeDevice) configuredKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.configuredPeers))
+	for i, p := range f.configuredPeers {
+		out[i] = p.PublicKey
+	}
+	return out
+}
 
 // fakeLinker — записывает порядок ОС-операций линка (вместо реального exec ip).
 type fakeLinker struct {

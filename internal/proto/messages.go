@@ -41,6 +41,10 @@ type HelloResponse struct {
 	AwgParams   awgparams.Params `json:"awg_params,omitempty"`
 	WGPort      int              `json:"wg_port,omitempty"` // WG-port на котором seed слушает
 	Peers       []PeerInfo       `json:"peers,omitempty"`   // текущий peer-list seed'а
+	// Отозванные ноды (revoke/leave) — новичок принимает их сразу, чтобы не
+	// подхватить уже отозванного peer'а от отстающей ноды в переходном окне.
+	// omitempty: пустой набор не шлётся (старый клиент поле просто игнорит).
+	Tombstones []state.Tombstone `json:"tombstones,omitempty"`
 }
 
 // PeerInfo — wire-представление одного peer'а. ЕДИНЫЙ DTO для обоих control-plane

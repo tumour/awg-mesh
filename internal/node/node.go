@@ -35,6 +35,7 @@ type Device interface {
 	Configure(priv wgkey.Private, awgp awgparams.Params, localObf awgparams.LocalObf, peers []state.Peer, selfPubKey wgkey.Public) error
 	ApplyParams(awgp awgparams.Params) error
 	UpdatePeer(p state.Peer) error
+	RemovePeer(pubkeyBase64 string) error
 	Up() error
 	Name() string
 	Close()
@@ -103,6 +104,22 @@ func Run(ctx context.Context, opts Options) error {
 			s = migrated
 			logger.Info("state migrated to current schema", "from", from, "to", state.CurrentVersion)
 		}
+	}
+
+	// Startup: вычистить отозванных (tombstone) из Peers ДО Configure — иначе рестарт
+	// демона воскресил бы revoked на свежем device (Configure пушит peer-list без
+	// фильтра tombstones). Применение к РАБОТАЮЩЕМУ device в рантайме — reap-loop ниже.
+	if pruned, err := store.Update(func(st *state.State) error {
+		kept, removed := mesh.ApplyTombstones(st.Peers, st.Tombstones, st.PublicKey)
+		if len(removed) == 0 {
+			return state.ErrNoChange
+		}
+		st.Peers = kept
+		return nil
+	}); err != nil {
+		logger.Warn("startup prune revoked peers failed", "err", err)
+	} else {
+		s = pruned
 	}
 
 	priv, err := wgkey.ParsePrivate(s.PrivateKey)
@@ -187,19 +204,34 @@ func Run(ctx context.Context, opts Options) error {
 
 	if opts.GossipInterval > 0 {
 		gc := gossip.NewClient(store, pub.String(), opts.GossipInterval,
-			gossip.DefaultPort, func(newPeers []state.Peer) {
+			gossip.DefaultPort,
+			func(newPeers []state.Peer) {
 				for _, p := range newPeers {
 					if err := device.UpdatePeer(p); err != nil {
 						logger.Warn("push gossip peer to device failed", "peer", p.Label, "err", err)
 					}
 				}
-			}, logger)
+			},
+			func(removedPeers []state.Peer) {
+				// Отозванных (tombstone) снимаем с wg-device на лету — без рестарта.
+				for _, p := range removedPeers {
+					if err := device.RemovePeer(p.PublicKey); err != nil {
+						logger.Warn("remove revoked peer from device failed", "peer", p.Label, "err", err)
+					}
+				}
+			},
+			logger)
 		go gc.Run(ctx)
 	}
 
 	// flag-day-смена params: применяем Pending в назначенный ApplyAt (синхронно
 	// со всей сетью). reconfigure на лету, без пересоздания awg0.
 	go runParamFlip(ctx, store, device, flipInterval, logger)
+
+	// revoke/leave: снимаем отозванных с device НЕЗАВИСИМО от gossip-pull. Иначе при
+	// offline-таргете / в 2-нодовой сети / при NAT-leave (у leaver'а нет endpoint,
+	// seed не имеет gossip-кандидата) отозванный остался бы живым peer'ом на device.
+	go runTombstoneReap(ctx, store, device, flipInterval, logger)
 
 	// seed назначает ApplyAt анонсированному Pending только когда ВСЕ ноды
 	// подтвердили его приём (ack-then-commit) — иначе flip не стартует и сеть
@@ -285,6 +317,72 @@ func applyDueParams(store *state.Store, dev Device, logger *slog.Logger) {
 		return
 	}
 	logger.Info("flag-day params applied", "version", version)
+}
+
+// runTombstoneReap периодически снимает отозванные ноды с device (см. reapRevoked).
+// Завершается по ctx.
+func runTombstoneReap(ctx context.Context, store *state.Store, dev Device, interval time.Duration, logger *slog.Logger) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			reapRevoked(store, dev, logger)
+		}
+	}
+}
+
+// reapRevoked снимает отозванные (tombstone) ноды с wg-device и убирает их из
+// state.Peers — НЕЗАВИСИМО от gossip-pull. Это страховка для случаев, где doRound
+// никогда не доходит до применения: offline-таргет, 2-нодовая сеть, NAT-leave (у
+// leaver'а нет endpoint → seed не имеет gossip-кандидата для pull).
+//
+// Device-снятие идёт по СПИСКУ tombstones, а НЕ по diff'у Peers — так reap работает
+// истинным реконсилером: повторяет прошлую неудачу RemovePeer и гасит peer'а,
+// которого gossip-гонка (UpdatePeer) могла ре-добавить на device уже после prune'а
+// из Peers. RemovePeer для отсутствующего peer'а — дешёвый UAPI no-op, так что
+// повтор каждый tick безвреден.
+func reapRevoked(store *state.Store, dev Device, logger *slog.Logger) {
+	s, err := store.Read()
+	if err != nil {
+		logger.Warn("reap revoked: read failed", "err", err)
+		return
+	}
+	if len(s.Tombstones) == 0 {
+		return
+	}
+
+	// 1. Device-reconcile: снять с wg-device каждого отозванного (кроме self —
+	//    форж tombstone(self) не должен гасить нас самих, как и в ApplyTombstones).
+	for _, t := range s.Tombstones {
+		if t.PublicKey == s.PublicKey {
+			continue
+		}
+		if err := dev.RemovePeer(t.PublicKey); err != nil {
+			logger.Warn("reap revoked: remove from device failed", "pubkey", mesh.ShortKey(t.PublicKey), "err", err)
+		}
+	}
+
+	// 2. State-prune: убрать отозванных из Peers (не анонсировать их и не конфигурить
+	//    на рестарте). Идемпотентно: уже вычищено → ErrNoChange (диск не трогаем).
+	var pruned []state.Peer
+	if _, err := store.Update(func(s *state.State) error {
+		kept, removed := mesh.ApplyTombstones(s.Peers, s.Tombstones, s.PublicKey)
+		if len(removed) == 0 {
+			return state.ErrNoChange
+		}
+		s.Peers = kept
+		pruned = removed
+		return nil
+	}); err != nil {
+		logger.Warn("reap revoked: persist failed", "err", err)
+		return
+	}
+	for _, p := range pruned {
+		logger.Info("revoked peer pruned from peer-list", "peer", p.Label, "mesh_ip", p.NodeIP)
+	}
 }
 
 // commitGrace — фора между назначением ApplyAt (когда все ноды подтвердили

@@ -292,6 +292,7 @@ func respondOK(conn net.Conn, cs *noise.CipherState, s *state.State, yourIP stri
 		AwgParams:   s.AwgParams,
 		WGPort:      s.ListenPort,
 		Peers:       proto.PeerInfosFromState(s.Peers),
+		Tombstones:  s.Tombstones,
 	}
 	if err := proto.WriteMessage(conn, cs, resp); err != nil {
 		logger.Warn("write hello-resp failed", "err", err)

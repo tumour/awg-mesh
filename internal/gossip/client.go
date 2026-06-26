@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -24,12 +25,16 @@ type Client struct {
 	interval time.Duration
 	port     int
 	http     *http.Client
-	// onNewPeers вызывается с новыми peer'ами для пуша в wg-device.
+	// onNewPeers вызывается с новыми/обновлёнными peer'ами для пуша в wg-device.
 	onNewPeers func(peers []state.Peer)
-	log        *slog.Logger
+	// onRemovedPeers вызывается с отозванными (tombstone) peer'ами — снять с
+	// wg-device через RemovePeer (на лету, без рестарта).
+	onRemovedPeers func(peers []state.Peer)
+	log            *slog.Logger
 }
 
-// NewClient создаёт gossip-клиента. onNewPeers — callback для wg-device-update.
+// NewClient создаёт gossip-клиента. onNewPeers/onRemovedPeers — callback'и для
+// wg-device: добавить/обновить и снять (revoke) peer'ов соответственно.
 // logger (nil → slog.Default()) инъектируется для embeddability.
 func NewClient(
 	store *state.Store,
@@ -37,19 +42,21 @@ func NewClient(
 	interval time.Duration,
 	port int,
 	onNewPeers func([]state.Peer),
+	onRemovedPeers func([]state.Peer),
 	logger *slog.Logger,
 ) *Client {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Client{
-		store:      store,
-		selfPub:    selfPub,
-		interval:   interval,
-		port:       port,
-		http:       &http.Client{Timeout: 10 * time.Second},
-		onNewPeers: onNewPeers,
-		log:        logger.With("component", "gossip"),
+		store:          store,
+		selfPub:        selfPub,
+		interval:       interval,
+		port:           port,
+		http:           &http.Client{Timeout: 10 * time.Second},
+		onNewPeers:     onNewPeers,
+		onRemovedPeers: onRemovedPeers,
+		log:            logger.With("component", "gossip"),
 	}
 }
 
@@ -106,13 +113,25 @@ func (c *Client) doRound(ctx context.Context) {
 	// работает на state.Peer и не знает про wire-форматы.
 	remote := proto.PeerInfosToState(resp.Peers)
 
-	var changed []state.Peer
+	var changed, removed []state.Peer
 	var rejected []string
 	var adoptedPending *state.PendingParams
+	var newTombstones int
 	if _, err := c.store.Update(func(s *state.State) error {
-		merged, ch, rej, persist := mesh.MergePeers(s.Peers, remote, c.selfPub, s.NetworkCIDR)
+		// Сначала мерджим отзывы: MergePeers ниже должен видеть актуальный набор
+		// tombstones, чтобы выкинуть отозванных из local И не воскресить из remote.
+		mergedTomb, addedTomb := mesh.MergeTombstones(s.Tombstones, resp.Tombstones)
+		newTombstones = len(addedTomb)
+
+		merged, ch, rej, persist := mesh.MergePeers(s.Peers, remote, mergedTomb, c.selfPub, s.NetworkCIDR)
 		rejected = rej
 		changed = ch
+		// removed — те, кто РЕАЛЬНО был у нас и теперь отозван: их надо снять с
+		// wg-device. Считаем от старого s.Peers (не от merged) — иначе в removed
+		// попали бы реанонсы из remote, которых на device и не было. Идемпотентно:
+		// в следующем цикле отозванного уже нет в s.Peers → removed пуст.
+		_, removed = mesh.ApplyTombstones(s.Peers, mergedTomb, c.selfPub)
+
 		// Принять запланированную смену params, если она строго новее нашей
 		// (домен решает монотонность). Trust-by-tunneling: внутри wg-туннеля
 		// источник уже прошёл cluster-secret-проверку.
@@ -120,14 +139,14 @@ func (c *Client) doRound(ctx context.Context) {
 			s.Pending = resp.Pending
 			adoptedPending = resp.Pending
 		}
-		// Пишем файл по persist (значимое изменение для диска), НЕ по changed
-		// (что пушить в device): label/IsSeed-обновления значимы для state, но в
-		// changed не попадают — без этого они бы молча терялись. Принятый Pending —
-		// тоже значимое изменение для диска.
-		if !persist && adoptedPending == nil {
-			return state.ErrNoChange // только LastSeen-refresh — файл не трогаем
+		// Пишем файл по любому значимому изменению: peers (persist, включая удаление
+		// отозванных), принятый Pending, новые tombstones. Чистый LastSeen-refresh
+		// (persist=false) файл не трогает — иначе flash-wear каждый gossip-цикл.
+		if !persist && adoptedPending == nil && len(addedTomb) == 0 {
+			return state.ErrNoChange
 		}
 		s.Peers = merged
+		s.Tombstones = mergedTomb
 		return nil
 	}); err != nil {
 		c.log.Warn("merge/save state failed", "err", err)
@@ -137,17 +156,25 @@ func (c *Client) doRound(ctx context.Context) {
 		c.log.Info("pending params adopted", "version", adoptedPending.Version,
 			"apply_at", adoptedPending.ApplyAt, "from", target.Label)
 	}
-	// Отказы — потенциальные попытки угона mesh-IP/маршрута соседом; видно оператору.
+	if newTombstones > 0 {
+		c.log.Info("tombstones adopted", "count", newTombstones, "from", target.Label)
+	}
+	// Отказы — попытки угона mesh-IP/маршрута ИЛИ заблокированный реанонс отозванного.
 	for _, r := range rejected {
 		c.log.Warn("gossip peer rejected", "reason", r, "from", target.Label)
 	}
-	if len(changed) == 0 {
-		return
+	// Снятие отозванных с wg-device (RemovePeer) — на лету, без рестарта демона.
+	if len(removed) > 0 {
+		if c.onRemovedPeers != nil {
+			c.onRemovedPeers(removed)
+		}
+		c.log.Info("peers revoked", "count", len(removed), "from", target.Label)
 	}
-	c.log.Info("peers added/updated", "count", len(changed), "from", target.Label)
-
-	if c.onNewPeers != nil {
-		c.onNewPeers(changed)
+	if len(changed) > 0 {
+		c.log.Info("peers added/updated", "count", len(changed), "from", target.Label)
+		if c.onNewPeers != nil {
+			c.onNewPeers(changed)
+		}
 	}
 }
 
@@ -183,6 +210,33 @@ func pickRandomPeer(candidates []state.Peer) *state.Peer {
 	}
 	picked := candidates[rand.IntN(len(candidates))]
 	return &picked
+}
+
+// PushTombstone отправляет один tombstone на /v1/tombstone цели (через wg-туннель).
+// Используется meshd leave: уходящая нода — особенно за NAT, которую никто не пуллит
+// (mesh.GossipCandidates) — сама пушит свой отзыв endpoint-пирам, иначе он не
+// разойдётся. Best-effort: caller логирует исход по каждому пиру. hc инъектируется,
+// чтобы вызывать из CLI без полного Client.
+func PushTombstone(ctx context.Context, hc *http.Client, meshIP string, port int, ts state.Tombstone) error {
+	body, err := json.Marshal(ts)
+	if err != nil {
+		return err
+	}
+	reqURL := fmt.Sprintf("http://%s:%d/v1/tombstone", meshIP, port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // Доменный merge peer-list'а живёт в internal/mesh.MergePeers — вызывается
