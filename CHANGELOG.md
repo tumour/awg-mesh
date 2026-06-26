@@ -3,6 +3,26 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.6.3] — 2026-06-26
+
+Истинная причина того, что flag-day-смена сетевых params применялась только на
+seed (а остальные оставались на старом наборе → рассинхрон). 0.6.2 чинил лишь
+вторичный симптом (тайминг); здесь — корень.
+
+### Fixed
+- **Момент применения (`ApplyAt`) теперь распространяется по gossip на все ноды.**
+  Seed при commit проставляет `ApplyAt`, НЕ меняя номер версии. Приём Pending
+  (`ShouldAdoptPending`) смотрел только на версию и отвергал такой Pending как «не
+  новее» — поэтому ноды, уже принявшие анонс, никогда не получали `ApplyAt` и не
+  применяли flip. Теперь дополнительно принимается переход «announced → committed»
+  в пределах одной версии (локально `ApplyAt` пуст, пришёл с `ApplyAt`), строго
+  один раз: уже закоммиченный Pending не пере-планируется (защита от сдвига flip
+  чужой нодой) и не откатывается обратно в announced.
+
+### Changed
+- `commitGrace` уменьшен с 6 до 2 gossip-циклов: после фикса распространения
+  `ApplyAt` большой запас не нужен (плюс окно `maxStale` сверху).
+
 ## [0.6.2] — 2026-06-26
 
 Исправление flag-day-смены сетевых params: при первом боевом применении часть нод
@@ -328,6 +348,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.6.3]: https://github.com/tumour/awg-mesh/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/tumour/awg-mesh/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/tumour/awg-mesh/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/tumour/awg-mesh/compare/v0.5.0...v0.6.0
