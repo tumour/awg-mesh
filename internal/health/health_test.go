@@ -56,48 +56,88 @@ func TestDialReachableRefused(t *testing.T) {
 	}
 }
 
-func TestReachableSelfUpPeerRefused(t *testing.T) {
-	// Локальный демон жив (слушаем как gossip) → здоров.
-	selfLn := mustListen(t)
-	defer selfLn.Close()
-	acceptAndClose(selfLn)
+func TestSelfUp(t *testing.T) {
+	// Свой gossip-сокет слушает → демон поднял awg0 и жив.
+	ln := mustListen(t)
+	defer ln.Close()
+	acceptAndClose(ln)
+	if !SelfUp(ln.Addr().String()) {
+		t.Fatal("want SelfUp=true while our gossip socket accepts")
+	}
 
-	peerLn := mustListen(t)
-	peerAddr := peerLn.Addr().String()
-	peerLn.Close() // закрыт → RST
+	// Сокет закрыт → демон не поднялся.
+	down := mustListen(t)
+	downAddr := down.Addr().String()
+	down.Close()
+	if SelfUp(downAddr) {
+		t.Fatal("want SelfUp=false when our gossip socket is down")
+	}
 
-	if !Reachable(selfLn.Addr().String(), peerAddr) {
-		t.Fatal("want healthy: self up")
+	// Пустой addr — нечего пробовать.
+	if SelfUp("") {
+		t.Fatal("want SelfUp=false for empty addr")
 	}
 }
 
-func TestReachableSelfUpSkipsUnreachablePeer(t *testing.T) {
-	// OR-семантика (регресс на ложный откат): живой локальный демон = здоров,
-	// даже если сосед недостижим (192.0.2.0/24 TEST-NET-1 не маршрутизируется).
-	// self проверяется первым, поэтому до медленного peer-dial дело не доходит.
-	selfLn := mustListen(t)
-	defer selfLn.Close()
-	acceptAndClose(selfLn)
+func TestPeerUp(t *testing.T) {
+	// Сосед слушает → коннект удался → туннель маршрутизирует.
+	ln := mustListen(t)
+	defer ln.Close()
+	acceptAndClose(ln)
+	if !PeerUp(ln.Addr().String()) {
+		t.Fatal("want PeerUp=true while the peer accepts")
+	}
 
-	if !Reachable(selfLn.Addr().String(), "192.0.2.1:9100") {
-		t.Fatal("self up must be healthy regardless of an unreachable peer")
+	// Сосед достижим, но порт закрыт (RST): хост ответил → awg0 всё равно
+	// маршрутизирует, считаем достижимым.
+	rst := mustListen(t)
+	rstAddr := rst.Addr().String()
+	rst.Close()
+	if !PeerUp(rstAddr) {
+		t.Fatal("want PeerUp=true on RST (host reachable through the tunnel)")
+	}
+
+	// Пустой addr — соседа нет.
+	if PeerUp("") {
+		t.Fatal("want PeerUp=false for empty addr")
 	}
 }
 
-func TestReachableLocalDaemonDown(t *testing.T) {
-	// Свой демон не слушает, соседа нет → нездорово.
-	selfLn := mustListen(t)
-	selfAddr := selfLn.Addr().String()
-	selfLn.Close()
-
-	if Reachable(selfAddr, "") {
-		t.Fatal("want unhealthy when local daemon is down and no peer")
+// TestUpgradeHealthy — ядро peer-gated watchdog'а. Решение «оставить апгрейд или
+// откатить» как чистая функция от трёх сигналов: жив ли свой демон, достижим ли
+// сосед через туннель ПОСЛЕ апгрейда, и был ли сосед достижим ДО апгрейда.
+//
+// Суть фикса: если туннель БЫЛ (baseline=true), «свой демон поднялся» больше НЕ
+// засчитывается как здоровье — демон может забиндить сокет, маршрутизируя ноль
+// (self-first дыра, из-за которой нода без out-of-band могла окирпичиться).
+// Требуем возврата туннеля.
+func TestUpgradeHealthy(t *testing.T) {
+	tests := []struct {
+		name         string
+		selfOK       bool
+		peerOK       bool
+		peerBaseline bool
+		want         bool
+	}{
+		{"had tunnel, came back", true, true, true, true},
+		// КЛЮЧЕВОЙ кейс: туннель был, демон встал, но туннель мёртв → ОТКАТ.
+		{"had tunnel, daemon up but tunnel dead -> rollback", true, false, true, false},
+		{"had tunnel, total death", false, false, true, false},
+		// Туннеля не было (нода и так изолирована/одна) → лучшее, что можем —
+		// убедиться, что свой демон вернулся; ложный откат тут не нужен.
+		{"was isolated, daemon back -> best effort keep", true, false, false, true},
+		{"was isolated, nothing", false, false, false, false},
+		// Связь УЛУЧШИЛАСЬ (соседа не было, стал) — однозначно здорово.
+		{"no baseline but peer now reachable", false, true, false, true},
+		{"working tunnel always healthy", false, true, true, true},
 	}
-}
-
-func TestReachableBothEmpty(t *testing.T) {
-	// Нечего проверять → недостижимо (не объявляем здоровым вслепую).
-	if Reachable("", "") {
-		t.Fatal("want false when there is nothing to probe")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := UpgradeHealthy(tt.selfOK, tt.peerOK, tt.peerBaseline)
+			if got != tt.want {
+				t.Fatalf("UpgradeHealthy(self=%v peer=%v baseline=%v) = %v, want %v",
+					tt.selfOK, tt.peerOK, tt.peerBaseline, got, tt.want)
+			}
+		})
 	}
 }

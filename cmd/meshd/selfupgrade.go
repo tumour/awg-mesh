@@ -224,6 +224,19 @@ func cmdWatchdog(args []string) error {
 	lg.Printf("armed (apply=%s self=%s peer=%s grace=%s timeout=%s)",
 		*apply, *selfIP, *peer, *grace, *timeout)
 
+	// Baseline ДО апгрейда: пока старый демон ещё держит туннель, фиксируем, был ли
+	// сосед достижим. Был → после апгрейда требуем возврата туннеля (peer-gate),
+	// «свой демон поднялся» не зачтётся. Соседа нет/недостижим → fallback на self.
+	peerBaseline := *peer != "" && peerReachableNow(*peer)
+	switch {
+	case *peer == "":
+		lg.Printf("no health-peer — self-only check (can't peer-gate)")
+	case peerBaseline:
+		lg.Printf("baseline: peer %s reachable before upgrade — peer-gated (tunnel must return)", *peer)
+	default:
+		lg.Printf("baseline: peer %s NOT reachable before upgrade — self-only fallback", *peer)
+	}
+
 	// 1) Применяем апгрейд синхронно. Если уже это провалилось — откат сразу.
 	if err := applyUpgrade(lg, *apply, *target, *newBin); err != nil {
 		lg.Printf("apply FAILED: %v — rolling back", err)
@@ -236,7 +249,7 @@ func cmdWatchdog(args []string) error {
 	time.Sleep(*grace)
 	deadline := time.Now().Add(*timeout)
 	for {
-		if upgradeHealthy(*selfIP, *peer) {
+		if upgradeHealthy(*selfIP, *peer, peerBaseline) {
 			lg.Printf("mesh reachable — upgrade OK, keeping new binary")
 			_ = os.Remove(*backup)
 			return nil
@@ -335,8 +348,18 @@ func runCmd(lg *log.Logger, timeout time.Duration, name string, args ...string) 
 }
 
 // upgradeHealthy — вернулась ли нода в строй после рестарта. mesh-IP'шники
-// превращаются в gossip-адреса (:9100); решение принимает health.Reachable.
-func upgradeHealthy(selfIP, peer string) bool {
+// превращаются в gossip-адреса (:9100); peer-gated-решение принимает
+// health.UpgradeHealthy. peerBaseline — был ли сосед достижим ДО апгрейда:
+// если был, «свой демон поднялся» уже не засчитывается, требуем возврат туннеля.
+func upgradeHealthy(selfIP, peer string, peerBaseline bool) bool {
 	port := strconv.Itoa(gossip.DefaultPort)
-	return health.Reachable(health.Addr(selfIP, port), health.Addr(peer, port))
+	selfOK := health.SelfUp(health.Addr(selfIP, port))
+	peerOK := health.PeerUp(health.Addr(peer, port))
+	return health.UpgradeHealthy(selfOK, peerOK, peerBaseline)
+}
+
+// peerReachableNow — достижим ли сосед прямо сейчас (для baseline-замера ДО
+// апгрейда, пока старый демон ещё держит туннель).
+func peerReachableNow(peer string) bool {
+	return health.PeerUp(health.Addr(peer, strconv.Itoa(gossip.DefaultPort)))
 }
