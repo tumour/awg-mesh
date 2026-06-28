@@ -209,6 +209,39 @@ func Generate() (Params, error) {
 	}, nil
 }
 
+// Validate проверяет СЕТЕВЫЕ Params на жёсткие констрейнты amneziawg-go. Нарушение
+// любого → IpcErrorInvalid на IpcSet → Configure падает на КАЖДОЙ ноде (params общие
+// на весь mesh) → рушится ВСЯ сеть. Поэтому набор, заданный оператором явными
+// аргументами set-params, обязан пройти Validate ДО анонса flag-day.
+//
+// Проверяется:
+//   - неотрицательность S1-S4 и junk-полей, Jmax >= Jmin (иначе диапазон junk пуст);
+//   - padded init и response различаются по размеру (wgInitMsgSize+S1 !=
+//     wgResponseMsgSize+S2) — иначе amneziawg не различит их длины;
+//   - H1-H4 валидны (Min in [5, safeHeaderMax], Min<=Max) и попарно не пересекаются.
+//
+// Верхнюю границу S намеренно не навязываем: огромный S4 раздувает per-packet padding
+// и сжимает MTU (см. wg.TunMTU) — это операционный footgun, не крах Configure; значения
+// оператор берёт из рекомендованных диапазонов (см. Generate).
+func Validate(p Params) error {
+	if p.S1 < 0 || p.S2 < 0 || p.S3 < 0 || p.S4 < 0 {
+		return fmt.Errorf("S1-S4 не могут быть отрицательными: S1=%d S2=%d S3=%d S4=%d", p.S1, p.S2, p.S3, p.S4)
+	}
+	if p.Jc < 0 || p.Jmin < 0 || p.Jmax < 0 {
+		return fmt.Errorf("Jc/Jmin/Jmax не могут быть отрицательными: Jc=%d Jmin=%d Jmax=%d", p.Jc, p.Jmin, p.Jmax)
+	}
+	if p.Jmax < p.Jmin {
+		return fmt.Errorf("Jmax (%d) < Jmin (%d): диапазон junk-пакетов пуст", p.Jmax, p.Jmin)
+	}
+	if wgInitMsgSize+p.S1 == wgResponseMsgSize+p.S2 {
+		return fmt.Errorf("padded init (148+S1=%d) и response (92+S2=%d) совпали по размеру — amneziawg отвергнет: задай разные S1/S2", wgInitMsgSize+p.S1, wgResponseMsgSize+p.S2)
+	}
+	if !validHeaderRanges([4]HeaderRange{p.H1, p.H2, p.H3, p.H4}) {
+		return fmt.Errorf("H1-H4 должны быть в [5, %d], Min<=Max и попарно не пересекаться: H1=%v H2=%v H3=%v H4=%v", safeHeaderMax, p.H1, p.H2, p.H3, p.H4)
+	}
+	return nil
+}
+
 // randHeaderRange — случайный H-диапазон [Min, Min+width] в safe-half, Min>4.
 func randHeaderRange() (HeaderRange, error) {
 	width, err := randIntRange(16, 256)

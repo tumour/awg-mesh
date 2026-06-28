@@ -34,6 +34,7 @@ import (
 type Device interface {
 	Configure(priv wgkey.Private, awgp awgparams.Params, localObf awgparams.LocalObf, peers []state.Peer, selfPubKey wgkey.Public) error
 	ApplyParams(awgp awgparams.Params) error
+	ApplyObf(localObf awgparams.LocalObf) error
 	UpdatePeer(p state.Peer) error
 	RemovePeer(pubkeyBase64 string) error
 	Up() error
@@ -262,11 +263,20 @@ func Run(ctx context.Context, opts Options) error {
 	// seed не имеет gossip-кандидата) отозванный остался бы живым peer'ом на device.
 	go runTombstoneReap(ctx, store, device, flipInterval, logger)
 
-	// seed: commit-гейт назначает ApplyAt, когда все подтвердили АНОНС; arm/abort-гейт
-	// отменяет flip (переанонс v+1), если к дедлайну не все подтвердили приём ApplyAt —
-	// тогда не флипает никто, сеть цела, ретрай (гарантия «ноду не теряем»).
+	// obf-обход: применяем присланный seed'ом per-node I1 на лету (reconciler по ObfVersion).
+	// Начальная версия = boot-конфиг (Configure уже применил текущий LocalObf при подъёме awg0).
+	go runObfApply(ctx, newObfApplier(store, device, s.ObfVersion, logger), flipInterval)
+
+	// seed: flag-day раздаётся active-push'ем — seed POST'ит Pending каждой ноде и
+	// собирает ack ПРЯМО из ответа (а не пассивным pull'ом, дававшим livelock+strand).
+	// На тех же ack'ах: commit-гейт назначает ApplyAt, когда все подтвердили АНОНС;
+	// arm/abort-гейт отменяет flip (переанонс v+1), если к дедлайну не все подтвердили
+	// приём ApplyAt — тогда не флипает никто, сеть цела, ретрай (гарантия «ноду не теряем»).
 	if s.IsSeed {
-		go runParamCommit(ctx, store, gossipSrv, pub.String(), flipInterval, commitGrace, abortMargin, logger)
+		go runParamPush(ctx, newSeedParamPusher(store, gossip.DefaultPort, pub.String(), commitGrace, abortMargin, logger), flipInterval)
+		// obf-обход: seed активно раздаёт каждой ноде её per-node I1 (генерит из
+		// ObfPolicy.SNI) и ретраит до подтверждения всех. I1 не рвёт туннель → strand невозможен.
+		go runObfPush(ctx, newSeedObfPusher(store, gossip.DefaultPort, pub.String(), logger), flipInterval)
 	}
 
 	logger.Info("ready, waiting for signals")
@@ -489,30 +499,6 @@ func abortMarginFor(gossipInterval time.Duration) time.Duration {
 		return m
 	}
 	return 15 * time.Second
-}
-
-// paramAcker — источник обоих ack-каналов для seed-петли (его удовлетворяет gossip.Server).
-type paramAcker interface {
-	Acks() map[string]uint64       // announce-ack: видел анонс версии
-	CommitAcks() map[string]uint64 // commit-ack: держит committed ApplyAt версии
-}
-
-// runParamCommit (seed-only) на каждом тике: commit-гейт (назначить ApplyAt, когда все
-// подтвердили анонс) и arm/abort-гейт (отменить flip, если к дедлайну не все подтвердили
-// приём ApplyAt). Завершается по ctx.
-func runParamCommit(ctx context.Context, store *state.Store, acks paramAcker, selfPub string, interval, grace, abortMargin time.Duration, logger *slog.Logger) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			now := time.Now().UTC()
-			commitIfAllAcked(store, acks.Acks(), selfPub, grace, logger)
-			abortIfStuck(store, acks.CommitAcks(), selfPub, abortMargin, now, logger)
-		}
-	}
 }
 
 // abortIfStuck (seed-only) отменяет застрявший committed flip: если к дедлайну

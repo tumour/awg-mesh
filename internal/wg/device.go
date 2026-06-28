@@ -26,11 +26,11 @@ import (
 const persistentKeepaliveSec = 25
 
 // MTU-расчёт для awg0. WG-дефолт 1420 рассчитан на path-MTU 1500, но «трудные»
-// пути (РФ→загранка, PPPoE) часто < 1500, а ICMP «fragmentation needed» на них
+// пути (дальние маршруты, PPPoE) часто < 1500, а ICMP «fragmentation needed» на них
 // блэкхолится → полноразмерные пакеты молча дропаются (PMTU-блэкхол), крупный
 // TCP встаёт колом. AWG-2.0 усугубляет: s4-паддинг добавляется к КАЖДОМУ data-
-// пакету сверху WG-оверхеда. Проверено на проде (sel2→hetzner, path-MTU ~1450):
-// при MTU 1420 TCP РФ→загранка = 0.7 Мбит/с, при computed-MTU 1319 = 583 Мбит/с.
+// пакету сверху WG-оверхеда. Проверено в поле (path-MTU ~1450): при MTU 1420
+// TCP на таком пути = 0.7 Мбит/с, при computed-MTU 1319 = 583 Мбит/с.
 //
 // Считаем автоматически из сетевого s4 — на каждой ноде, без ручной настройки.
 const (
@@ -206,6 +206,18 @@ func (d *Device) ApplyParams(p awgparams.Params) error {
 	writeNetParams(&sb, p)
 	if err := d.dev.IpcSet(sb.String()); err != nil {
 		return fmt.Errorf("IpcSet net-params: %w", err)
+	}
+	return nil
+}
+
+// ApplyObf применяет per-node obf-пакеты I1-I5 к уже поднятому awg0 на лету — через UAPI,
+// без пересоздания интерфейса. I1 initiator-local (получатель его игнорирует) → туннели
+// НЕ рвутся, синхронность не нужна. Ошибка IpcSet (кривой spec) → caller оставляет прежний obf.
+func (d *Device) ApplyObf(lo awgparams.LocalObf) error {
+	var sb strings.Builder
+	writeLocalObf(&sb, lo)
+	if err := d.dev.IpcSet(sb.String()); err != nil {
+		return fmt.Errorf("IpcSet local-obf: %w", err)
 	}
 	return nil
 }

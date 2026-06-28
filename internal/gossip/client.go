@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/mesh"
@@ -100,10 +98,9 @@ func (c *Client) doRound(ctx context.Context) {
 		return
 	}
 
-	// ack: шлём цели ДВА репорта — announce-ack (видели анонс до версии) и commit-ack
-	// (держим committed ApplyAt до версии). Seed по первому коммитит ApplyAt, по
-	// второму «вооружает» flip; расхождение и есть защита от strand'а медленной ноды.
-	resp, err := c.fetchPeers(ctx, target.NodeIP, mesh.AnnounceAckVersion(st), mesh.CommitAckVersion(st))
+	// flag-day-подтверждения нода отдаёт НЕ здесь: seed собирает их прямым active-push'ем
+	// (POST /v1/params). Pull остаётся резервным каналом ДОСТАВКИ Pending (адопт ниже).
+	resp, err := c.fetchPeers(ctx, target.NodeIP)
 	if err != nil {
 		c.selector.recordFailure(target.PublicKey, now)
 		c.log.Warn("fetch peers failed", "peer", target.Label, "mesh_ip", target.NodeIP, "err", err)
@@ -183,15 +180,9 @@ func (c *Client) doRound(ctx context.Context) {
 }
 
 // fetchPeers — HTTP GET /v1/peers через wg-туннель. ctx прокидывается, чтобы
-// летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута. announceAck/
-// commitAck — два ack-репорта (см. doRound).
-func (c *Client) fetchPeers(ctx context.Context, meshIP string, announceAck, commitAck uint64) (*PeersResponse, error) {
-	q := url.Values{
-		"node": {c.selfPub},
-		"v":    {strconv.FormatUint(announceAck, 10)},
-		"cv":   {strconv.FormatUint(commitAck, 10)},
-	}
-	reqURL := fmt.Sprintf("http://%s:%d/v1/peers?%s", meshIP, c.port, q.Encode())
+// летящий запрос обрывался при shutdown, не дожидаясь HTTP-таймаута.
+func (c *Client) fetchPeers(ctx context.Context, meshIP string) (*PeersResponse, error) {
+	reqURL := fmt.Sprintf("http://%s:%d/v1/peers", meshIP, c.port)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err

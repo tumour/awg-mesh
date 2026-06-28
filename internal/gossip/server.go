@@ -19,8 +19,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/mesh"
@@ -41,21 +39,14 @@ const (
 )
 
 // Server — HTTP API для отдачи peer-listа.
+//
+// flag-day-подтверждения (ack/commit-ack) собираются НЕ здесь: seed их получает
+// прямым active-push'ем (handleParams отвечает версиями ноды), а не пассивным pull.
 type Server struct {
 	store *state.Store
 	addr  string
 	srv   *http.Server
 	log   *slog.Logger
-
-	// acks — announce-ack: высшая версия params, АНОНС которой видел каждый пир
-	// (?node=&v=). Seed по ним решает, все ли получили анонс (commit-гейт).
-	// commitAcks — commit-ack: высшая версия, для которой пир уже держит COMMITTED
-	// ApplyAt (?cv=). Seed по ним «вооружает» flip (arm-гейт) — без этого второго
-	// сигнала медленная нода, не получившая ApplyAt, застряла бы на старом наборе.
-	// В памяти: ack'и эфемерны (рестарт seed'а пересоберёт).
-	mu         sync.Mutex
-	acks       map[string]uint64
-	commitAcks map[string]uint64
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO
@@ -63,6 +54,10 @@ type Server struct {
 // раздают запланированную flag-day-смену сетевых params: получатель принимает
 // строго более новый Pending (mesh.ShouldAdoptPending) и применит его синхронно
 // в ApplyAt. PendingParams сериализуется как есть (domain-тип, JSON-готов).
+//
+// Pending здесь — РЕЗЕРВНЫЙ канал доставки: основной путь flag-day'я — active-push
+// (POST /v1/params, прямой ack). Дубль через pull повышает шанс, что нода вовремя
+// получит committed ApplyAt и флипнет синхронно со всеми (страховка против strand'а).
 //
 // Tombstones — отозванные ноды (revoke/leave). Раздаются union'ом, как peers;
 // получатель мерджит их (mesh.MergeTombstones), снимает отозванных с wg-device и
@@ -84,48 +79,10 @@ func NewServer(host string, port int, store *state.Store, logger *slog.Logger) *
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	return &Server{
-		store:      store,
-		addr:       addr,
-		log:        logger.With("component", "gossip"),
-		acks:       map[string]uint64{},
-		commitAcks: map[string]uint64{},
+		store: store,
+		addr:  addr,
+		log:   logger.With("component", "gossip"),
 	}
-}
-
-// recordAck монотонно запоминает announce-ack пира (видел анонс версии version).
-func (s *Server) recordAck(pubkey string, version uint64) { s.bumpAck(s.acks, pubkey, version) }
-
-// recordCommitAck монотонно запоминает commit-ack пира (держит committed ApplyAt версии).
-func (s *Server) recordCommitAck(pubkey string, version uint64) { s.bumpAck(s.commitAcks, pubkey, version) }
-
-// bumpAck монотонно поднимает версию пира в указанной мапе под локом (общим для
-// обоих ack-каналов). Пустой pubkey игнорируем.
-func (s *Server) bumpAck(m map[string]uint64, pubkey string, version uint64) {
-	if pubkey == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if version > m[pubkey] {
-		m[pubkey] = version
-	}
-}
-
-// Acks возвращает копию announce-ack'ов (pubkey → версия). Snapshot под локом.
-func (s *Server) Acks() map[string]uint64 { return s.snapshotAcks(s.acks) }
-
-// CommitAcks возвращает копию commit-ack'ов (pubkey → версия). Snapshot под локом.
-func (s *Server) CommitAcks() map[string]uint64 { return s.snapshotAcks(s.commitAcks) }
-
-// snapshotAcks копирует ack-мапу под локом, чтобы seed-commit-loop читал без гонки.
-func (s *Server) snapshotAcks(m map[string]uint64) map[string]uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]uint64, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 // Start запускает сервер. Останавливается при отмене ctx.
@@ -133,6 +90,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/peers", s.handlePeers)
 	mux.HandleFunc("/v1/tombstone", s.handleTombstone)
+	mux.HandleFunc("/v1/obf", s.handleObf)
+	mux.HandleFunc("/v1/params", s.handleParams)
 
 	s.srv = &http.Server{
 		Addr:              s.addr,
@@ -162,18 +121,6 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
-	}
-	// ack: «пир node видел анонс до v» (announce-ack) и «держит committed ApplyAt
-	// до cv» (commit-ack). Trust-by-tunneling — источник уже прошёл cluster-secret.
-	// cv отсутствует у старого бинаря → commit-ack остаётся 0 (seed не armʼит) —
-	// безопасно в mixed-version раскатке.
-	if node := r.URL.Query().Get("node"); node != "" {
-		if v, err := strconv.ParseUint(r.URL.Query().Get("v"), 10, 64); err == nil {
-			s.recordAck(node, v)
-		}
-		if cv, err := strconv.ParseUint(r.URL.Query().Get("cv"), 10, 64); err == nil {
-			s.recordCommitAck(node, cv)
-		}
 	}
 	st, err := s.store.Read()
 	if err != nil {

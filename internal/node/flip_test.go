@@ -257,15 +257,6 @@ func TestAbortIfStuck(t *testing.T) {
 	})
 }
 
-// bothAcker — провайдер ОБОИХ ack-каналов для runParamCommit (вместо gossip-сервера).
-type bothAcker struct {
-	ack    func() map[string]uint64
-	commit func() map[string]uint64
-}
-
-func (b bothAcker) Acks() map[string]uint64       { return b.ack() }
-func (b bothAcker) CommitAcks() map[string]uint64 { return b.commit() }
-
 // waitFor поллит cond до 2с (через store — без гонки на полях fake-device).
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
@@ -307,40 +298,6 @@ func TestRunParamFlip(t *testing.T) {
 	go runParamFlip(ctx, f, 5*time.Millisecond)
 
 	waitFor(t, func() bool { s, _ := store.Read(); return s.Pending == nil })
-}
-
-// runParamCommit happy-path: все подтвердили И анонс, И приём ApplyAt → коммитит и НЕ
-// абортит (armed), ApplyAt держится.
-func TestRunParamCommit_CommitsWhenAllAcked(t *testing.T) {
-	store := seedStore(t, announced())
-	all := func() map[string]uint64 { return map[string]uint64{"A": 2, "B": 2} }
-	acker := bothAcker{ack: all, commit: all}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// grace велик, abortMargin велик → abort в коротком тесте не сработает; armed и так держит
-	go runParamCommit(ctx, store, acker, "SELF", 5*time.Millisecond, 30*time.Second, 10*time.Second, quietLogger())
-
-	waitFor(t, func() bool { s, _ := store.Read(); return s.Pending != nil && !s.Pending.ApplyAt.IsZero() })
-}
-
-// РЕГРЕСС flint2: анонс подтвердили все, но приём committed ApplyAt — НЕ все (B молчит).
-// seed обязан НЕ оставить committed flip, а отменить его (переанонс v>2). Так seed не
-// уходит на новый набор в одиночку, изолируя B.
-func TestRunParamCommit_AbortsWhenCommitAcksMissing(t *testing.T) {
-	store := seedStore(t, announced())
-	acker := bothAcker{
-		ack:    func() map[string]uint64 { return map[string]uint64{"A": 2, "B": 2} }, // анонс — все
-		commit: func() map[string]uint64 { return map[string]uint64{"A": 2} },         // приём ApplyAt — только A
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// grace мал, abortMargin мал → быстро коммитит v2 и быстро абортит в v3
-	go runParamCommit(ctx, store, acker, "SELF", 2*time.Millisecond, 12*time.Millisecond, 4*time.Millisecond, quietLogger())
-
-	waitFor(t, func() bool {
-		s, _ := store.Read()
-		return s.Pending != nil && s.Pending.Version > 2 && s.Pending.ApplyAt.IsZero()
-	})
 }
 
 // commitGraceFor / abortMarginFor привязывают окна к gossip-интервалу. Ключевой инвариант

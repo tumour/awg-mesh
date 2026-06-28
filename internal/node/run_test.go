@@ -25,7 +25,9 @@ type fakeDevice struct {
 	configuredObf   awgparams.LocalObf // что ушло в Configure (для проверки backfill I1)
 	configuredPeers []state.Peer       // что ушло в Configure (для проверки startup-prune)
 	appliedParams   bool
-	applyParamsErr  error    // инъекция: ошибка из ApplyParams (для error-ветки flip)
+	applyParamsErr  error              // инъекция: ошибка из ApplyParams (для error-ветки flip)
+	appliedObf      awgparams.LocalObf // что ушло в ApplyObf (проверка применения присланного I1)
+	applyObfErr     error              // инъекция: ошибка из ApplyObf (для retry-ветки reconciler)
 	removePeerErr   error    // инъекция: ошибка из RemovePeer (для retry-ветки reap)
 	updated         []string // pubkeys через UpdatePeer
 	removed         []string // pubkeys через RemovePeer
@@ -44,6 +46,15 @@ func (f *fakeDevice) Configure(_ wgkey.Private, _ awgparams.Params, lo awgparams
 func (f *fakeDevice) ApplyParams(awgparams.Params) error {
 	f.appliedParams = true
 	return f.applyParamsErr
+}
+func (f *fakeDevice) ApplyObf(lo awgparams.LocalObf) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.applyObfErr != nil {
+		return f.applyObfErr
+	}
+	f.appliedObf = lo
+	return nil
 }
 func (f *fakeDevice) UpdatePeer(p state.Peer) error {
 	f.mu.Lock()

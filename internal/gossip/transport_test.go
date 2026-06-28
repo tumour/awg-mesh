@@ -437,38 +437,6 @@ func TestPushTombstoneEndToEnd(t *testing.T) {
 	}
 }
 
-// doRound при pull сообщает цели свой ack: node=selfPub и v=max(ParamsVersion,
-// Pending.Version) — это вход для seed-commit. Без корректного ack flip не
-// закоммитится никогда, поэтому путь обязателен к проверке.
-func TestDoRoundSendsAck(t *testing.T) {
-	var gotNode, gotV string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotNode = r.URL.Query().Get("node")
-		gotV = r.URL.Query().Get("v")
-		_ = json.NewEncoder(w).Encode(PeersResponse{})
-	}))
-	defer ts.Close()
-	host, p, _ := net.SplitHostPort(ts.Listener.Addr().String())
-	port, _ := strconv.Atoi(p)
-
-	store := saveState(t, &state.State{
-		NetworkCIDR: "100.64.0.0/24", PublicKey: "SELFPUB", NodeIP: "100.64.0.1",
-		ParamsVersion: 4,
-		Pending:       &state.PendingParams{Version: 7}, // acked = max(4,7) = 7
-		Peers:         []state.Peer{{Label: "t", PublicKey: "tk", NodeIP: host, Endpoint: "203.0.113.1:51820"}},
-	})
-	c := NewClient(store, "SELFPUB", time.Minute, port, nil, nil, discardLogger())
-
-	c.doRound(context.Background())
-
-	if gotNode != "SELFPUB" {
-		t.Errorf("ack node = %q, want SELFPUB", gotNode)
-	}
-	if gotV != "7" {
-		t.Errorf("ack v = %q, want 7 (max of paramsVersion=4, pending=7)", gotV)
-	}
-}
-
 // doRound устойчив к сбойному ответу цели (5xx / битый JSON): не паникует, state
 // не меняет. Реальный кейс — сосед в плохом состоянии.
 func TestDoRoundHandlesBadResponse(t *testing.T) {
@@ -646,31 +614,6 @@ func TestDoRoundIgnoresStalePending(t *testing.T) {
 	if got.Pending != nil {
 		t.Fatalf("stale pending must be ignored, got %+v", got.Pending)
 	}
-}
-
-// handlePeers записывает ack из query (?node=&v=) монотонно — seed по ним решает,
-// все ли получили Pending.
-func TestHandlePeersRecordsAck(t *testing.T) {
-	store := saveState(t, &state.State{NetworkCIDR: "100.64.0.0/24", PublicKey: "selfkey", NodeIP: "100.64.0.1"})
-	srv := NewServer("100.64.0.1", DefaultPort, store, discardLogger())
-
-	get := func(q string) {
-		rec := httptest.NewRecorder()
-		srv.handlePeers(rec, httptest.NewRequest(http.MethodGet, "/v1/peers?"+q, nil))
-	}
-	get("node=peerX&v=5")
-	if srv.Acks()["peerX"] != 5 {
-		t.Fatalf("ack не записан: %v", srv.Acks())
-	}
-	get("node=peerX&v=3") // меньшая версия не откатывает
-	if srv.Acks()["peerX"] != 5 {
-		t.Errorf("ack откатился назад: %v", srv.Acks())
-	}
-	get("node=peerX&v=7") // большая — обновляет
-	if srv.Acks()["peerX"] != 7 {
-		t.Errorf("ack не вырос до 7: %v", srv.Acks())
-	}
-	get("") // без node — игнор, без паники
 }
 
 // handlePeers отвечает 405 на не-GET (gossip read-only).

@@ -39,12 +39,12 @@ const CurrentVersion = 2
 // State — корневая структура persistent state.
 type State struct {
 	Version   int    `json:"version"`    // схема файла (== CurrentVersion); ставит Save
-	NodeLabel string `json:"node_label"` // человекочитаемая метка ('beget', 'hetzner')
+	NodeLabel string `json:"node_label"` // человекочитаемая метка ('node-a', 'edge-1')
 
 	// Cluster identity
 	ClusterSecret string             `json:"cluster_secret"` // base32, 32 байта
 	AwgParams     awgparams.Params   `json:"awg_params"`     // СЕТЕВЫЕ (flag-day), раздаются
-	LocalObf      awgparams.LocalObf `json:"local_obf"`      // ПО-НОДНЫЕ I1-I5, НЕ раздаются
+	LocalObf      awgparams.LocalObf `json:"local_obf"`      // применённые I1-I5 (раздаются seed'ом per-node, см. ObfPolicy/ObfVersion)
 	NetworkCIDR   string             `json:"network_cidr"`   // например "100.64.0.0/24"
 
 	// Версионирование сетевых params для flag-day-смены (S3/S4/H на лету).
@@ -53,6 +53,14 @@ type State struct {
 	// одновременно со всеми (см. internal/mesh paramsync.go).
 	ParamsVersion uint64         `json:"params_version"`           // 0 = исходные с init/join
 	Pending       *PendingParams `json:"pending_params,omitempty"` // запланированный flip, nil = нет
+
+	// obf-обход (per-node CPS-пакет I1, мимикрия под QUIC+SNI), раздаётся seed'ом:
+	// seed держит ObfPolicy (SNI + версия, НЕ покидает seed), генерит per-node I1 и
+	// активно пушит каждой ноде; нода кладёт полученный I1 в LocalObf и помнит его
+	// версию в ObfVersion (монотонный идемпотентный приём, см. internal/mesh obf.go).
+	// Оба поля omitempty/аддитивны → старый бинарь читает state без них и не падает.
+	ObfVersion uint64     `json:"obf_version,omitempty"` // версия применённого LocalObf (0 = дефолт)
+	ObfPolicy  *ObfPolicy `json:"obf_policy,omitempty"`  // ТОЛЬКО на seed: источник раздачи (SNI)
 
 	// Наша node identity
 	PrivateKey string `json:"private_key"` // base64 WG-encoded (32 байта)
@@ -87,6 +95,14 @@ type PendingParams struct {
 	Params  awgparams.Params `json:"params"`
 	Version uint64           `json:"version"`  // строго > State.ParamsVersion
 	ApplyAt time.Time        `json:"apply_at"` // UTC, момент синхронного применения
+}
+
+// ObfPolicy — политика obf-обхода на seed: какой SNI вшивать в раздаваемый per-node I1.
+// Живёт ТОЛЬКО в state seed'а — SNI не попадает ни в wire, ни в state нод (ноды получают
+// уже готовый I1). Version монотонно растёт при каждой смене SNI.
+type ObfPolicy struct {
+	SNI     string `json:"sni"`
+	Version uint64 `json:"version"`
 }
 
 // Peer — другая нода в mesh-сети, известная нам.
