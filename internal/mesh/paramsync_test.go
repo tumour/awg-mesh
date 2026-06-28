@@ -164,7 +164,7 @@ func TestCommitPending(t *testing.T) {
 
 // CommitAckVersion — что нода репортит как «версия, которую я держу COMMITTED или
 // применила». Анонс (ApplyAt=0) НЕ считается committed — иначе seed решил бы, что нода
-// готова флипать, когда она лишь получила анонс (исходный баг flint2).
+// готова флипать, когда она лишь получила анонс (исходный strand-баг).
 func TestCommitAckVersion(t *testing.T) {
 	cases := []struct {
 		name string

@@ -14,7 +14,7 @@ import (
 // флаги → node.Join → печать + host-integration (firewall/autostart).
 func cmdJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
-	label := fs.String("label", "", "human-readable node label (required), e.g. 'hetzner'")
+	label := fs.String("label", "", "human-readable node label (required), e.g. 'node-a'")
 	tokenStr := fs.String("token", "", "join-token from `meshd init` output (required)")
 	publicEndpoint := fs.String("public-endpoint", "",
 		"public endpoint announced to peers (host:port), e.g. <public-ip>:51820 — "+

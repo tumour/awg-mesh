@@ -10,14 +10,14 @@ import (
 
 func TestBuildStatusMarksSelfAndRole(t *testing.T) {
 	s := &state.State{
-		NodeLabel:   "flint2",
+		NodeLabel:   "node-a",
 		NetworkCIDR: "100.64.0.0/24",
 		NodeIP:      "100.64.0.3",
 		PublicKey:   "MYPUB",
 		IsSeed:      false,
 		Peers: []state.Peer{
-			{Label: "vps", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", PublicKey: "SEED", IsSeed: true},
-			{Label: "flint2", NodeIP: "100.64.0.3", PublicKey: "MYPUB"},
+			{Label: "hub", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", PublicKey: "SEED", IsSeed: true},
+			{Label: "node-a", NodeIP: "100.64.0.3", PublicKey: "MYPUB"},
 		},
 	}
 

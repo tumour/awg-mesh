@@ -6,16 +6,16 @@ import (
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
-// Топология hub-and-spoke: vps — hub (есть endpoint), ax3200/flint2 — spoke (NAT,
-// без endpoint). Между двумя spoke прямого пути нет.
+// Топология hub-and-spoke: hub (есть endpoint), spoke-a/spoke-b (NAT, без endpoint).
+// Между двумя spoke прямого пути нет.
 func threeNodeState(selfPub string) *state.State {
 	return &state.State{
 		PublicKey:   selfPub,
 		NetworkCIDR: "100.64.0.0/24",
 		Peers: []state.Peer{
-			{Label: "vps", PublicKey: "VPS", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", IsSeed: true},
-			{Label: "ax3200", PublicKey: "AX", NodeIP: "100.64.0.2"},    // NAT, без endpoint
-			{Label: "flint2", PublicKey: "FLINT", NodeIP: "100.64.0.3"}, // NAT, без endpoint
+			{Label: "hub", PublicKey: "HUB", NodeIP: "100.64.0.1", Endpoint: "1.2.3.4:51820", IsSeed: true},
+			{Label: "spoke-a", PublicKey: "SPOKEA", NodeIP: "100.64.0.2"}, // NAT, без endpoint
+			{Label: "spoke-b", PublicKey: "SPOKEB", NodeIP: "100.64.0.3"}, // NAT, без endpoint
 		},
 	}
 }
@@ -31,17 +31,17 @@ func keysOf(peers []state.Peer) map[string]bool {
 // Ядро фикса: spoke (мы за NAT) НЕ выбирает другой spoke (тоже за NAT) — пути нет.
 // Кандидат должен остаться только hub (с endpoint).
 func TestGossipCandidatesSpokeDoesNotPickSpoke(t *testing.T) {
-	// Мы = ax3200 (spoke, без endpoint).
-	s := threeNodeState("AX")
+	// Мы = spoke-a (spoke, без endpoint).
+	s := threeNodeState("SPOKEA")
 	got := keysOf(GossipCandidates(s))
 
-	if !got["VPS"] {
-		t.Fatal("spoke must keep the hub (vps has endpoint) as a gossip target")
+	if !got["HUB"] {
+		t.Fatal("spoke must keep the hub (it has endpoint) as a gossip target")
 	}
-	if got["FLINT"] {
-		t.Fatal("spoke must NOT pick another spoke (flint2 is NAT, no path) — this is the noise bug")
+	if got["SPOKEB"] {
+		t.Fatal("spoke must NOT pick another spoke (it is NAT, no path) — this is the noise bug")
 	}
-	if got["AX"] {
+	if got["SPOKEA"] {
 		t.Fatal("must never target self")
 	}
 	if len(GossipCandidates(s)) != 1 {
@@ -49,14 +49,14 @@ func TestGossipCandidatesSpokeDoesNotPickSpoke(t *testing.T) {
 	}
 }
 
-// Регресс на БАГ #1 (прод v0.4.0): hub (У НАС есть endpoint) тоже НЕ опрашивает
+// Регресс на БАГ #1 (полевой v0.4.0): hub (У НАС есть endpoint) тоже НЕ опрашивает
 // NAT-spoke. Инициировать gossip-pull к узлу без endpoint нельзя — его адрес wg
 // выучивает лишь динамически и теряет при рестарте (→ спам «no known endpoint» на
 // seed после рестарта), и незачем — spoke сам пуллит hub. Раньше тут был тест
 // HubReachesAll, который УТВЕРЖДАЛ багованное поведение и потому маскировал баг.
 func TestGossipCandidatesHubDoesNotPickSpoke(t *testing.T) {
-	// Мы = vps (hub, с endpoint); ax3200/flint2 — NAT-spoke без endpoint.
-	s := threeNodeState("VPS")
+	// Мы = hub (с endpoint); spoke-a/spoke-b — NAT-spoke без endpoint.
+	s := threeNodeState("HUB")
 	got := GossipCandidates(s)
 	if len(got) != 0 {
 		t.Fatalf("hub must NOT gossip-poll NAT spokes (no endpoint), got %v", keysOf(got))
@@ -88,9 +88,9 @@ func TestGossipCandidatesHubPicksOtherHub(t *testing.T) {
 // Spoke с двумя hub'ами видит оба.
 func TestGossipCandidatesSpokePicksAllHubs(t *testing.T) {
 	s := &state.State{
-		PublicKey: "AX",
+		PublicKey: "SPOKE",
 		Peers: []state.Peer{
-			{PublicKey: "AX", NodeIP: "100.64.0.2"}, // мы, NAT
+			{PublicKey: "SPOKE", NodeIP: "100.64.0.2"}, // мы, NAT
 			{PublicKey: "HUB1", NodeIP: "100.64.0.1", Endpoint: "1.1.1.1:51820"},
 			{PublicKey: "HUB2", NodeIP: "100.64.0.5", Endpoint: "2.2.2.2:51820"},
 			{PublicKey: "SPOKE2", NodeIP: "100.64.0.6"}, // другой NAT — отсечь
@@ -125,9 +125,9 @@ func TestGossipCandidatesAllNATNoCandidates(t *testing.T) {
 // Пир без NodeIP (некорректная/недорегистрированная запись) не кандидат.
 func TestGossipCandidatesSkipsEmptyNodeIP(t *testing.T) {
 	s := &state.State{
-		PublicKey: "AX",
+		PublicKey: "SPOKE",
 		Peers: []state.Peer{
-			{PublicKey: "AX", NodeIP: "100.64.0.2"},
+			{PublicKey: "SPOKE", NodeIP: "100.64.0.2"},
 			{PublicKey: "HUB", NodeIP: "100.64.0.1", Endpoint: "1.1.1.1:51820"},
 			{PublicKey: "NOIP", NodeIP: "", Endpoint: "3.3.3.3:51820"}, // endpoint есть, но IP нет
 		},

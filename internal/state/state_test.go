@@ -16,7 +16,7 @@ import (
 func TestSaveLoadV2RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	in := &State{
-		NodeLabel:     "hetzner",
+		NodeLabel:     "node-a",
 		ClusterSecret: "secret",
 		AwgParams: awgparams.Params{
 			Jc: 5, Jmin: 50, Jmax: 200, S1: 30, S2: 41, S3: 32, S4: 16,
