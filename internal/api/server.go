@@ -14,6 +14,9 @@
 //	GET /api/v1/status → полный StatusView (self + peers)
 //	GET /api/v1/peers  → коллекция PeerView
 //	GET /api/v1/health → HealthView (state-derived роллап)
+//
+// При заданном webDir всё, что не под /api/, отдаётся статикой web-морды (index.html
+// + assets) с того же origin — фронтенд ходит в API относительным путём, без CORS.
 package api
 
 import (
@@ -37,6 +40,10 @@ type LiveStatsFunc func() (map[string]mesh.PeerLive, error)
 // DefaultPort — порт control-API. Слушает только на mesh-IP (рядом с gossip 9100).
 const DefaultPort = 9110
 
+// DefaultWebDir — каталог собранной web-морды (ставится отдельным web-пакетом на
+// seed). Если каталога нет (нода без UI) — передаём "", API работает без статики.
+const DefaultWebDir = "/usr/share/meshd/web"
+
 // HTTP-таймауты: те же соображения, что у gossip — даже в доверенном туннеле
 // медленный/зависший клиент не должен держать соединение и goroutine (slowloris).
 const (
@@ -47,27 +54,29 @@ const (
 	shutdownTimeout   = 5 * time.Second
 )
 
-// Server — read-only control-API поверх state.
+// Server — read-only control-API поверх state (+ раздача web-морды).
 type Server struct {
-	store *state.Store
-	stats LiveStatsFunc // nil → API без live-обогащения (state-only)
-	addr  string
-	srv   *http.Server
-	log   *slog.Logger
+	store  *state.Store
+	stats  LiveStatsFunc // nil → API без live-обогащения (state-only)
+	webDir string        // "" → без статики (только API)
+	addr   string
+	srv    *http.Server
+	log    *slog.Logger
 }
 
 // NewServer создаёт API-сервер на host:port (host обычно = state.NodeIP).
-// stats (nil → state-only) — источник live-сигнала. logger (nil → slog.Default())
-// инъектируется для тестируемости/embeddability.
-func NewServer(host string, port int, store *state.Store, stats LiveStatsFunc, logger *slog.Logger) *Server {
+// stats (nil → state-only) — источник live-сигнала. webDir (""→ без UI) — каталог
+// статики web-морды. logger (nil → slog.Default()) инъектируется для тестов.
+func NewServer(host string, port int, store *state.Store, stats LiveStatsFunc, webDir string, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
-		store: store,
-		stats: stats,
-		addr:  net.JoinHostPort(host, fmt.Sprintf("%d", port)),
-		log:   logger.With("component", "api"),
+		store:  store,
+		stats:  stats,
+		webDir: webDir,
+		addr:   net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		log:    logger.With("component", "api"),
 	}
 }
 
@@ -81,7 +90,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/status", s.get(s.handleStatus))
 	mux.HandleFunc("/api/v1/peers", s.get(s.handlePeers))
 	mux.HandleFunc("/api/v1/health", s.get(s.handleHealth))
-	mux.HandleFunc("/", s.handleNotFound) // catch-all → JSON-404
+	// неизвестный /api/* → наш JSON-404, а НЕ статика (иначе улетело бы в index.html)
+	mux.HandleFunc("/api/", s.handleNotFound)
+
+	if s.webDir != "" {
+		// статика web-морды (index.html + assets), same-origin с API → без CORS.
+		// http.Dir чистит путь и не пускает за пределы webDir (защита от traversal).
+		fs := http.FileServer(http.Dir(s.webDir))
+		mux.HandleFunc("/", s.get(fs.ServeHTTP))
+	} else {
+		mux.HandleFunc("/", s.handleNotFound) // UI не установлен → JSON-404
+	}
 	return s.recoverPanic(s.logRequests(mux))
 }
 

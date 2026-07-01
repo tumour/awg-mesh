@@ -11,6 +11,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +44,15 @@ type Device interface {
 	Up() error
 	Name() string
 	Close()
+}
+
+// staticWebDir — каталог web-морды, если он реально установлен (есть index.html).
+// Иначе "" → API поднимается без статики: нода без web-пакета не отдаёт битый UI.
+func staticWebDir() string {
+	if _, err := os.Stat(filepath.Join(api.DefaultWebDir, "index.html")); err != nil {
+		return ""
+	}
+	return api.DefaultWebDir
 }
 
 // deviceLiveStats — адаптер device → api.LiveStatsFunc: читает live-статистику
@@ -244,7 +255,7 @@ func Run(ctx context.Context, opts Options) error {
 	// Read-only control-API для web-морды — ТОЛЬКО на seed (web живёт на seed),
 	// слушает только mesh-IP как gossip. Тонкий бинарь на роутерах его не поднимает.
 	if s.IsSeed {
-		apiSrv := api.NewServer(s.NodeIP, api.DefaultPort, store, deviceLiveStats(device), logger)
+		apiSrv := api.NewServer(s.NodeIP, api.DefaultPort, store, deviceLiveStats(device), staticWebDir(), logger)
 		go func() {
 			if err := apiSrv.Start(ctx); err != nil {
 				logger.Error("api server stopped", "err", err)

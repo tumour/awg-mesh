@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +52,7 @@ func testStore(t *testing.T, s *state.State) *state.Store {
 
 func testHandler(t *testing.T, s *state.State) http.Handler {
 	t.Helper()
-	return NewServer("127.0.0.1", DefaultPort, testStore(t, s), nil, discardLogger()).Handler()
+	return NewServer("127.0.0.1", DefaultPort, testStore(t, s), nil, "", discardLogger()).Handler()
 }
 
 func do(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
@@ -193,7 +195,7 @@ func TestStatusEndpointLiveOnline(t *testing.T) {
 			"PUBKEYGW": {LastHandshake: time.Now().Add(-10 * time.Second)},
 		}, nil
 	}
-	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, discardLogger()).Handler()
+	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, "", discardLogger()).Handler()
 	rec := do(t, h, http.MethodGet, "/api/v1/status")
 
 	var body struct {
@@ -226,7 +228,7 @@ func TestStatusEndpointStatsErrorDegradesToStateOnly(t *testing.T) {
 	stats := func() (map[string]mesh.PeerLive, error) {
 		return nil, errors.New("device unavailable")
 	}
-	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, discardLogger()).Handler()
+	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, "", discardLogger()).Handler()
 	rec := do(t, h, http.MethodGet, "/api/v1/status")
 
 	if rec.Code != http.StatusOK {
@@ -244,6 +246,79 @@ func TestStatusEndpointStatsErrorDegradesToStateOnly(t *testing.T) {
 		if p.LiveStatus != "" {
 			t.Errorf("live_status = %q при ошибке источника, want пусто", p.LiveStatus)
 		}
+	}
+}
+
+// --- раздача статики web-морды ---
+
+func testWebDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<!doctype html><title>ui</title>"), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "assets", "js"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "assets", "js", "app.js"), []byte("export const x = 1;\n"), 0o644); err != nil {
+		t.Fatalf("write app.js: %v", err)
+	}
+	return dir
+}
+
+func staticHandler(t *testing.T) http.Handler {
+	t.Helper()
+	return NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), nil, testWebDir(t), discardLogger()).Handler()
+}
+
+func TestStaticServesIndex(t *testing.T) {
+	rec := do(t, staticHandler(t), http.MethodGet, "/")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "ui") {
+		t.Errorf("body = %q, ожидали index.html", rec.Body.String())
+	}
+}
+
+// .js обязан отдаваться с JS-MIME, иначе браузер не исполнит ES-модуль.
+func TestStaticServesAssetWithJSMime(t *testing.T) {
+	rec := do(t, staticHandler(t), http.MethodGet, "/assets/js/app.js")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("Content-Type = %q, want *javascript* (ES-модуль)", ct)
+	}
+}
+
+// Неизвестный /api/* остаётся JSON-404 ДАЖЕ со статикой — не улетает в index.html.
+func TestUnknownApiPathStaysJSON404WithStatic(t *testing.T) {
+	rec := do(t, staticHandler(t), http.MethodGet, "/api/v1/bogus")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var e errBody
+	decode(t, rec, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want not_found (JSON, не HTML)", e.Error.Code)
+	}
+}
+
+// Без webDir (UI не установлен) корень отдаёт JSON-404, а не лезет в статику.
+func TestStaticDisabledRootIsJSON404(t *testing.T) {
+	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), nil, "", discardLogger()).Handler()
+	rec := do(t, h, http.MethodGet, "/")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var e errBody
+	decode(t, rec, &e)
+	if e.Error.Code != "not_found" {
+		t.Errorf("error.code = %q, want not_found", e.Error.Code)
 	}
 }
 
@@ -282,7 +357,7 @@ func TestMethodNotAllowedReturns405WithAllow(t *testing.T) {
 // внутренней причины в тело.
 func TestStoreErrorReturns500(t *testing.T) {
 	badStore := state.NewStore(filepath.Join(t.TempDir(), "absent.json"))
-	h := NewServer("127.0.0.1", DefaultPort, badStore, nil, discardLogger()).Handler()
+	h := NewServer("127.0.0.1", DefaultPort, badStore, nil, "", discardLogger()).Handler()
 
 	rec := do(t, h, http.MethodGet, "/api/v1/status")
 	if rec.Code != http.StatusInternalServerError {
@@ -300,7 +375,7 @@ func TestStoreErrorReturns500(t *testing.T) {
 
 // Паника в хендлере не должна ронять сервер — recover-middleware отдаёт 500.
 func TestRecoverMiddlewareTurnsPanicInto500(t *testing.T) {
-	srv := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), nil, discardLogger())
+	srv := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), nil, "", discardLogger())
 	h := srv.recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))

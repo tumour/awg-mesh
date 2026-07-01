@@ -32,6 +32,11 @@ contents:
     dst: /lib/systemd/system/meshd.service
     file_info:
       mode: 0644
+  # web-морда (дашборд): статика, meshd отдаёт её на seed из /usr/share/meshd/web.
+  # Только в deb (платформа seed); в OpenWrt-apk не кладём — web на роутерах не нужен.
+  - src: ./web/dashboard
+    dst: /usr/share/meshd/web
+    type: tree
   - src: ./README.md
     dst: /usr/share/doc/meshd/README.md
     file_info:
