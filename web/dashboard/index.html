@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>awg-mesh — панель сети</title>
+
+  <!-- preload: стиль и все модули тянутся сразу, без водопада → быстрый init, без мигания -->
+  <link rel="preload" href="assets/css/dashboard.css" as="style">
+  <link rel="stylesheet" href="assets/css/dashboard.css">
+  <link rel="modulepreload" href="assets/js/alpine.esm.js">
+  <link rel="modulepreload" href="assets/js/api.js">
+  <link rel="modulepreload" href="assets/js/model.js">
+  <link rel="modulepreload" href="assets/js/map.js">
+  <link rel="modulepreload" href="assets/js/app.js">
+  <script type="module" src="assets/js/app.js"></script>
+</head>
+<body>
+  <div class="app" x-data="dashboard" x-cloak>
+    <!-- topbar -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="hex"></div>
+        <div><b>awg-mesh</b><small>control plane</small></div>
+      </div>
+      <div class="net-pill mono">CIDR <span x-text="network.cidr || '—'"></span></div>
+      <div class="health">
+        <span><span class="hdot green"></span><b x-text="health.online"></b> online</span>
+        <span><span class="hdot red"></span><b x-text="health.offline"></b> offline</span>
+        <span x-show="health.unknown"><span class="hdot grey"></span><b x-text="health.unknown"></b> unknown</span>
+      </div>
+      <div class="grow"></div>
+      <div class="toggle">
+        <button :class="{ on: view === 'map' }" @click="view = 'map'">Карта</button>
+        <button :class="{ on: view === 'table' }" @click="view = 'table'">Таблица</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <!-- left rail -->
+      <aside class="rail rail-left">
+        <div class="block">
+          <p class="kicker">Сеть</p>
+          <div class="stat"><span class="k">Ноды</span><span class="v" x-text="nodeCount"></span></div>
+          <div class="stat"><span class="k">Seed</span><span class="v teal" x-text="network.label || '—'"></span></div>
+          <div class="stat"><span class="k">CIDR</span><span class="v" x-text="network.cidr || '—'"></span></div>
+        </div>
+
+        <div class="block">
+          <p class="kicker">Здоровье</p>
+          <div class="rollup">
+            <i class="g" :style="`width:${pct(health.online)}%`"></i>
+            <i class="r" :style="`width:${pct(health.offline)}%`"></i>
+            <i class="u" :style="`width:${pct(health.unknown)}%`"></i>
+          </div>
+          <div class="legendrow"><span><span class="sw" style="background:var(--green)"></span>Онлайн</span><b x-text="health.online"></b></div>
+          <div class="legendrow"><span><span class="sw" style="background:var(--red)"></span>Оффлайн</span><b x-text="health.offline"></b></div>
+          <div class="legendrow"><span><span class="sw" style="background:var(--faint)"></span>Неизвестно</span><b x-text="health.unknown"></b></div>
+        </div>
+
+        <div class="block">
+          <p class="kicker">Легенда</p>
+          <div class="leg">
+            <div class="row"><span class="g-seed"></span> seed — раздаёт mesh-IP</div>
+            <div class="row"><span class="g-pub"></span> с endpoint — инициируема</div>
+            <div class="row"><span class="g-nat"></span> без endpoint — initiator-only</div>
+            <div class="row"><span class="e"></span> живой туннель (к нам)</div>
+            <div class="row"><span class="e down"></span> потухший / offline</div>
+            <div class="row"><span class="e possible"></span> возможный (пир↔пир)</div>
+            <div class="row" style="color: var(--faint)">NAT↔NAT — линии нет</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- stage -->
+      <section class="stage">
+        <div class="map" x-ref="map" x-show="view === 'map'"></div>
+
+        <div class="tableview" :class="{ only: view === 'table' }">
+          <div class="tblwrap">
+            <table class="tbl">
+              <thead>
+                <tr>
+                  <th>Нода</th><th>Роль</th><th>mesh-IP</th><th>endpoint</th>
+                  <th>состояние</th><th>handshake</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="n in nodes" :key="n.id">
+                  <tr @click="selectedId = n.id" :class="{ sel: n.id === selectedId }">
+                    <td>
+                      <span class="nodecell">
+                        <span class="g" :class="`role-${n.role} state-${n.state}`"></span>
+                        <span class="mono" x-text="n.label"></span>
+                      </span>
+                    </td>
+                    <td x-text="roleLabel(n.role)"></td>
+                    <td class="mono" x-text="n.ip"></td>
+                    <td class="mono" :class="{ muteEP: !n.endpoint }" x-text="n.endpoint || '— не объявлен'"></td>
+                    <td><span class="st" :class="`state-${n.state}`"><i></i><span x-text="stateLabel(n.state)"></span></span></td>
+                    <td class="mono" x-text="n.isSelf ? '—' : fmtAge(n.lastHandshake)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- overlay поверх stage: не двигает раскладку, поэтому ничего не «скачет» -->
+        <div class="overlay" x-show="loading" x-transition.opacity>загрузка…</div>
+        <div class="overlay err" x-show="error && !loading" x-text="'Ошибка API: ' + error"></div>
+      </section>
+
+      <!-- detail rail -->
+      <aside class="rail rail-right">
+        <p class="kicker">Узел</p>
+        <template x-if="selected">
+          <div>
+            <div class="d-head">
+              <div class="grow">
+                <div class="d-title" x-text="selected.label"></div>
+                <div class="d-sub" x-text="selected.ip"></div>
+              </div>
+              <span class="chip role" x-text="roleLabel(selected.role)"></span>
+            </div>
+            <span class="pill" :class="`state-${selected.state}`"><i></i><span x-text="stateLabel(selected.state)"></span></span>
+            <div class="fields">
+              <div class="field"><span class="fk">mesh-IP</span><span class="fv mono" x-text="selected.ip"></span></div>
+              <div class="field"><span class="fk">endpoint</span><span class="fv mono" :class="{ muteEP: !selected.endpoint }" x-text="selected.endpoint || '— не объявлен'"></span></div>
+              <div class="field"><span class="fk">достижимость</span><span class="fv mono" x-text="reachLabel(selected)"></span></div>
+              <div class="field"><span class="fk">last handshake</span><span class="fv mono" x-text="selected.isSelf ? '—' : fmtAge(selected.lastHandshake)"></span></div>
+              <div class="field"><span class="fk">public key</span><span class="fv mono" x-text="trunc(selected.publicKey)"></span></div>
+            </div>
+          </div>
+        </template>
+        <template x-if="!selected">
+          <div class="empty" x-text="loading ? 'загрузка…' : 'нет данных'"></div>
+        </template>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>
