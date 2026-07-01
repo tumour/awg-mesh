@@ -38,9 +38,26 @@ type Device interface {
 	ApplyObf(localObf awgparams.LocalObf) error
 	UpdatePeer(p state.Peer) error
 	RemovePeer(pubkeyBase64 string) error
+	PeerStats() ([]wg.PeerStat, error)
 	Up() error
 	Name() string
 	Close()
+}
+
+// deviceLiveStats — адаптер device → api.LiveStatsFunc: читает live-статистику
+// wg-device и конвертирует в доменный вход mesh.PeerLive (домен про UAPI/wg не знает).
+func deviceLiveStats(d Device) api.LiveStatsFunc {
+	return func() (map[string]mesh.PeerLive, error) {
+		stats, err := d.PeerStats()
+		if err != nil {
+			return nil, err
+		}
+		live := make(map[string]mesh.PeerLive, len(stats))
+		for _, st := range stats {
+			live[st.PublicKey] = mesh.PeerLive{LastHandshake: st.LastHandshake}
+		}
+		return live, nil
+	}
 }
 
 // Options — параметры запуска демона.
@@ -227,7 +244,7 @@ func Run(ctx context.Context, opts Options) error {
 	// Read-only control-API для web-морды — ТОЛЬКО на seed (web живёт на seed),
 	// слушает только mesh-IP как gossip. Тонкий бинарь на роутерах его не поднимает.
 	if s.IsSeed {
-		apiSrv := api.NewServer(s.NodeIP, api.DefaultPort, store, logger)
+		apiSrv := api.NewServer(s.NodeIP, api.DefaultPort, store, deviceLiveStats(device), logger)
 		go func() {
 			if err := apiSrv.Start(ctx); err != nil {
 				logger.Error("api server stopped", "err", err)

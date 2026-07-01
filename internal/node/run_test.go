@@ -11,6 +11,7 @@ import (
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/state"
+	"github.com/tumour/awg-mesh/internal/wg"
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
@@ -74,6 +75,8 @@ func (f *fakeDevice) RemovePeer(pubkey string) error {
 func (f *fakeDevice) Up() error    { f.upped = true; return nil }
 func (f *fakeDevice) Name() string { return f.name }
 func (f *fakeDevice) Close()       { f.closed = true }
+
+func (f *fakeDevice) PeerStats() ([]wg.PeerStat, error) { return nil, nil }
 
 // removedKeys / configuredKeys — снимок под локом для ассертов.
 func (f *fakeDevice) removedKeys() []string {

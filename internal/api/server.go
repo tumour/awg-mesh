@@ -24,8 +24,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
 )
+
+// LiveStatsFunc — источник live-сигнала (pubkey → mesh.PeerLive) для обогащения
+// статуса wg-handshake'ом. nil → API отдаёт state-only (без live_status).
+// Инъектируется из node (замыкание над wg-device). Ошибку возвращает наверх —
+// handler деградирует к state-only, а не роняет ответ в 500.
+type LiveStatsFunc func() (map[string]mesh.PeerLive, error)
 
 // DefaultPort — порт control-API. Слушает только на mesh-IP (рядом с gossip 9100).
 const DefaultPort = 9110
@@ -43,19 +50,22 @@ const (
 // Server — read-only control-API поверх state.
 type Server struct {
 	store *state.Store
+	stats LiveStatsFunc // nil → API без live-обогащения (state-only)
 	addr  string
 	srv   *http.Server
 	log   *slog.Logger
 }
 
 // NewServer создаёт API-сервер на host:port (host обычно = state.NodeIP).
-// logger (nil → slog.Default()) инъектируется для тестируемости/embeddability.
-func NewServer(host string, port int, store *state.Store, logger *slog.Logger) *Server {
+// stats (nil → state-only) — источник live-сигнала. logger (nil → slog.Default())
+// инъектируется для тестируемости/embeddability.
+func NewServer(host string, port int, store *state.Store, stats LiveStatsFunc, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
 		store: store,
+		stats: stats,
 		addr:  net.JoinHostPort(host, fmt.Sprintf("%d", port)),
 		log:   logger.With("component", "api"),
 	}

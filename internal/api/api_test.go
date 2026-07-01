@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -48,7 +50,7 @@ func testStore(t *testing.T, s *state.State) *state.Store {
 
 func testHandler(t *testing.T, s *state.State) http.Handler {
 	t.Helper()
-	return NewServer("127.0.0.1", DefaultPort, testStore(t, s), discardLogger()).Handler()
+	return NewServer("127.0.0.1", DefaultPort, testStore(t, s), nil, discardLogger()).Handler()
 }
 
 func do(t *testing.T, h http.Handler, method, target string) *httptest.ResponseRecorder {
@@ -182,6 +184,69 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+// --- live-обогащение ---
+
+// Свежий handshake пира → live_status "online" на /status.
+func TestStatusEndpointLiveOnline(t *testing.T) {
+	stats := func() (map[string]mesh.PeerLive, error) {
+		return map[string]mesh.PeerLive{
+			"PUBKEYGW": {LastHandshake: time.Now().Add(-10 * time.Second)},
+		}, nil
+	}
+	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, discardLogger()).Handler()
+	rec := do(t, h, http.MethodGet, "/api/v1/status")
+
+	var body struct {
+		Data struct {
+			Peers []struct {
+				PublicKey  string `json:"public_key"`
+				LiveStatus string `json:"live_status"`
+			} `json:"peers"`
+		} `json:"data"`
+	}
+	decode(t, rec, &body)
+
+	var found bool
+	for _, p := range body.Data.Peers {
+		if p.PublicKey == "PUBKEYGW" {
+			found = true
+			if p.LiveStatus != "online" {
+				t.Errorf("gw live_status = %q, want online", p.LiveStatus)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("пир PUBKEYGW не найден в ответе")
+	}
+}
+
+// Ошибка источника live-статистики (device недоступен) → 200 со state-only,
+// без live_status; НЕ 500 — live-обогащение необязательно.
+func TestStatusEndpointStatsErrorDegradesToStateOnly(t *testing.T) {
+	stats := func() (map[string]mesh.PeerLive, error) {
+		return nil, errors.New("device unavailable")
+	}
+	h := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), stats, discardLogger()).Handler()
+	rec := do(t, h, http.MethodGet, "/api/v1/status")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (деградация, не 500)", rec.Code)
+	}
+	var body struct {
+		Data struct {
+			Peers []struct {
+				LiveStatus string `json:"live_status"`
+			} `json:"peers"`
+		} `json:"data"`
+	}
+	decode(t, rec, &body)
+	for _, p := range body.Data.Peers {
+		if p.LiveStatus != "" {
+			t.Errorf("live_status = %q при ошибке источника, want пусто", p.LiveStatus)
+		}
+	}
+}
+
 // --- каноны ошибок ---
 
 func TestUnknownRouteReturns404JSON(t *testing.T) {
@@ -217,7 +282,7 @@ func TestMethodNotAllowedReturns405WithAllow(t *testing.T) {
 // внутренней причины в тело.
 func TestStoreErrorReturns500(t *testing.T) {
 	badStore := state.NewStore(filepath.Join(t.TempDir(), "absent.json"))
-	h := NewServer("127.0.0.1", DefaultPort, badStore, discardLogger()).Handler()
+	h := NewServer("127.0.0.1", DefaultPort, badStore, nil, discardLogger()).Handler()
 
 	rec := do(t, h, http.MethodGet, "/api/v1/status")
 	if rec.Code != http.StatusInternalServerError {
@@ -235,7 +300,7 @@ func TestStoreErrorReturns500(t *testing.T) {
 
 // Паника в хендлере не должна ронять сервер — recover-middleware отдаёт 500.
 func TestRecoverMiddlewareTurnsPanicInto500(t *testing.T) {
-	srv := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), discardLogger())
+	srv := NewServer("127.0.0.1", DefaultPort, testStore(t, sampleState()), nil, discardLogger())
 	h := srv.recoverPanic(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	}))

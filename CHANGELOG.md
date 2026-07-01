@@ -14,6 +14,14 @@
   `--json` (без дублирования логики); секретов API не отдаёт. Слушает ТОЛЬКО mesh-IP
   (как gossip, trust-by-tunneling) и поднимается ТОЛЬКО на seed — тонкий бинарь на
   роутерах его не запускает.
+- **Live-статус пиров в API (online/offline из wg-handshake).** `GET /api/v1/status`
+  и `/api/v1/peers` обогащают каждого пира полем `live_status` (`online`/`offline`;
+  пусто = неизвестно) и `last_handshake`, читая UAPI wg-device (`Device.PeerStats`):
+  online, если handshake был не позже 180с назад (3× rekey; keepalive=25с у
+  endpoint-пиров держит свежесть). Домен `mesh.BuildStatusLive` — чистый маппер (now
+  инъектируется); отказ источника (device недоступен) деградирует к state-only, а не
+  роняет в 500. «degraded» (DPI душит поток при живом handshake) в этот сигнал не
+  входит — требует анализа rx/tx-потока, отдельным инкрементом.
 
 ## [0.6.6] — 2026-06-28
 

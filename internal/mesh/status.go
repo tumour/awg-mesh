@@ -1,6 +1,10 @@
 package mesh
 
-import "github.com/tumour/awg-mesh/internal/state"
+import (
+	"time"
+
+	"github.com/tumour/awg-mesh/internal/state"
+)
 
 // StatusView — представление состояния ноды для ВСЕХ фронтендов (CLI-текст,
 // `status --json`, web-дашборд, LuCI). Единый источник: каждый фронтенд лишь
@@ -27,7 +31,12 @@ type PeerView struct {
 	PublicKey string `json:"public_key"`
 	IsSeed    bool   `json:"is_seed"`
 	IsSelf    bool   `json:"is_self"`
-	// Online / LastHandshake — позже, из live wg-handshake (см. feature-backlog).
+
+	// Live-сигнал (заполняет BuildStatusLive из wg-handshake). omitempty: без
+	// live-данных (BuildStatus, CLI) поля не сериализуются — контракт не врёт
+	// про достижимость. LiveStatus: "online"|"offline"; "" = неизвестно.
+	LiveStatus    string     `json:"live_status,omitempty"`
+	LastHandshake *time.Time `json:"last_handshake,omitempty"`
 }
 
 // BuildStatus — чистая функция state → StatusView. Не лезет в сеть/ОС/CLI.
