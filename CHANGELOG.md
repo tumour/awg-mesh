@@ -3,7 +3,13 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
-## [Unreleased]
+## [0.7.0] — 2026-07-01
+
+Веб-морда: read-only HTTP-API и живой дашборд сети на seed. meshd поднимает
+control-API (`/api/v1/status|peers|health`) и отдаёт статическую SPA — карту
+топологии mesh (кто с кем связан по объявленным endpoint'ам, NAT↔NAT без прямого
+пути) и таблицу нод, с живым online/offline из wg-handshake. Данные — тот же
+единый backend `mesh.BuildStatus`, что у CLI и `--json`; data plane не затронут.
 
 ### Added
 - **Read-only control-API для веб-морды (`internal/api`).** HTTP JSON-API под будущий
