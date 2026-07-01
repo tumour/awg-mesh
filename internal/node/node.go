@@ -16,6 +16,7 @@ import (
 
 	awgdev "github.com/amnezia-vpn/amneziawg-go/device"
 
+	"github.com/tumour/awg-mesh/internal/api"
 	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/bootstrap"
 	"github.com/tumour/awg-mesh/internal/clusterkey"
@@ -222,6 +223,17 @@ func Run(ctx context.Context, opts Options) error {
 			logger.Error("gossip server stopped", "err", err)
 		}
 	}()
+
+	// Read-only control-API для web-морды — ТОЛЬКО на seed (web живёт на seed),
+	// слушает только mesh-IP как gossip. Тонкий бинарь на роутерах его не поднимает.
+	if s.IsSeed {
+		apiSrv := api.NewServer(s.NodeIP, api.DefaultPort, store, logger)
+		go func() {
+			if err := apiSrv.Start(ctx); err != nil {
+				logger.Error("api server stopped", "err", err)
+			}
+		}()
+	}
 
 	if opts.GossipInterval > 0 {
 		gc := gossip.NewClient(store, pub.String(), opts.GossipInterval,

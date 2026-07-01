@@ -3,6 +3,18 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [Unreleased]
+
+### Added
+- **Read-only control-API для веб-морды (`internal/api`).** HTTP JSON-API под будущий
+  дашборд: `GET /api/v1/status` (статус ноды + peers), `/api/v1/peers` (список пиров),
+  `/api/v1/health` (роллап: версия params, число нод, запланированный flag-day). Единый
+  success-конверт `{"data":…}` и error-конверт `{"error":{code,message}}`, версия в пути.
+  Данные собирают `mesh.BuildStatus`/`BuildHealth` — тот же единый backend, что CLI и
+  `--json` (без дублирования логики); секретов API не отдаёт. Слушает ТОЛЬКО mesh-IP
+  (как gossip, trust-by-tunneling) и поднимается ТОЛЬКО на seed — тонкий бинарь на
+  роутерах его не запускает.
+
 ## [0.6.6] — 2026-06-28
 
 Seed раздаёт весь конфиг сам и надёжно: смена сетевых params и обфускация-обход
