@@ -1,0 +1,475 @@
+<title>awg-mesh — карта сети</title>
+<style>
+  :root{
+    --bg:#0d1520; --panel:#131f2e; --elev:#1a2942; --elev2:#20304a;
+    --line:#223449; --line-soft:#182636;
+    --ink:#e4ecf5; --dim:#8195ab; --faint:#546985;
+    --teal:#3bc4cc; --teal-deep:#1c6b73;
+    --green:#3fb950; --amber:#d99a2b; --red:#e5555b;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --ui:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --r:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--ui); font-size:14px; line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+  .app{display:flex; flex-direction:column; min-height:100vh}
+
+  /* ---------- topbar ---------- */
+  .topbar{
+    display:flex; align-items:center; gap:20px;
+    padding:12px 20px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#101a28,#0d1520);
+  }
+  .brand{display:flex; align-items:center; gap:11px; flex:0 0 auto}
+  .hex{
+    width:26px; height:26px; background:var(--teal);
+    clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);
+    box-shadow:0 0 14px rgba(59,196,204,.45);
+  }
+  .brand b{font-family:var(--mono); font-size:15px; letter-spacing:.02em; font-weight:600}
+  .brand small{color:var(--faint); font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin-left:2px}
+  .grow{flex:1 1 auto}
+  .net-pill{
+    font-family:var(--mono); font-size:12.5px; color:var(--ink);
+    background:var(--panel); border:1px solid var(--line);
+    padding:5px 11px; border-radius:99px;
+  }
+  .net-pill span{color:var(--teal)}
+  .health{display:flex; gap:14px; align-items:center; font-size:12.5px; color:var(--dim)}
+  .health b{color:var(--ink); font-family:var(--mono)}
+  .hdot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:1px}
+  .hdot.green{background:var(--green)} .hdot.amber{background:var(--amber)} .hdot.red{background:var(--red)}
+  .gossip{display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--faint)}
+  .gossip i{width:7px;height:7px;border-radius:50%;background:var(--teal);animation:pulse 2.4s ease-in-out infinite}
+  .toggle{display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden}
+  .toggle button{
+    font-family:var(--ui); font-size:12.5px; color:var(--dim);
+    background:transparent; border:0; padding:6px 13px; cursor:pointer;
+  }
+  .toggle button.on{background:var(--elev); color:var(--ink)}
+  .toggle button+button{border-left:1px solid var(--line)}
+
+  /* ---------- grid ---------- */
+  .grid{
+    flex:1 1 auto; display:grid;
+    grid-template-columns:250px minmax(0,1fr) 330px; gap:1px;
+    background:var(--line);
+  }
+  .rail{background:var(--bg); padding:18px 18px 24px; overflow-y:auto}
+  .stage{background:var(--bg); padding:18px; display:flex; flex-direction:column; gap:14px; min-width:0}
+
+  .kicker{
+    font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--faint); margin:0 0 12px;
+  }
+  .rail-left .block+.block{margin-top:22px}
+
+  .stat{display:flex; justify-content:space-between; align-items:baseline; padding:7px 0; border-bottom:1px solid rgba(34,52,73,.55)}
+  .stat .k{color:var(--dim); font-size:12.5px}
+  .stat .v{font-family:var(--mono); font-size:12.5px; color:var(--ink)}
+  .stat .v.teal{color:var(--teal)}
+
+  /* health rollup bar */
+  .rollup{display:flex; height:8px; border-radius:99px; overflow:hidden; margin:10px 0 12px; background:var(--panel)}
+  .rollup i{display:block}
+  .rollup .g{background:var(--green)} .rollup .a{background:var(--amber)} .rollup .r{background:var(--red)}
+  .legendrow{display:flex; justify-content:space-between; font-size:12px; color:var(--dim); padding:4px 0}
+  .legendrow b{font-family:var(--mono); color:var(--ink)}
+  .legendrow .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:8px;vertical-align:0}
+
+  /* map legend (shapes/edges) */
+  .leg{display:flex; flex-direction:column; gap:9px; font-size:12px; color:var(--dim)}
+  .leg .row{display:flex; align-items:center; gap:10px}
+  .leg .g-seed{width:16px;height:16px;background:var(--teal);clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+  .leg .g-pub{width:15px;height:15px;border-radius:50%;border:2px solid var(--green)}
+  .leg .g-nat{width:15px;height:15px;border-radius:50%;border:2px dashed var(--dim)}
+  .leg .e{width:22px;height:0;border-top:2px solid var(--teal)}
+  .leg .e.deg{border-top:2px dashed var(--amber)}
+  .leg .e.down{border-top:2px dashed var(--faint)}
+  .leg .e.blk{border-top:2px dotted var(--red)}
+
+  /* ---------- map ---------- */
+  .map{
+    position:relative; flex:1 1 auto; min-height:460px;
+    border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
+    background:
+      radial-gradient(520px 420px at 50% 50%, rgba(59,196,204,.10), transparent 70%),
+      linear-gradient(rgba(34,52,73,.25) 1px, transparent 1px) 0 0/34px 34px,
+      linear-gradient(90deg, rgba(34,52,73,.25) 1px, transparent 1px) 0 0/34px 34px,
+      var(--panel);
+  }
+  .edges{position:absolute; inset:0; width:100%; height:100%; pointer-events:none}
+  .ring{fill:none; stroke:var(--line); opacity:.45}
+  .edge{fill:none; stroke-linecap:round; transition:opacity .18s}
+  .edge.active{stroke:var(--teal); stroke-width:1.8; stroke-dasharray:2 6; animation:flow 1.1s linear infinite}
+  .edge.degraded{stroke:var(--amber); stroke-width:1.8; stroke-dasharray:6 5; opacity:.85}
+  .edge.down{stroke:var(--faint); stroke-width:1.6; stroke-dasharray:2 6; opacity:.5}
+  .edge.blocked{stroke:var(--red); stroke-width:1.4; stroke-dasharray:1 7; opacity:.4}
+  .edge.hot{stroke-width:2.6; filter:drop-shadow(0 0 6px rgba(59,196,204,.6))}
+  .edge.dim{opacity:.12}
+  @keyframes flow{to{stroke-dashoffset:-16}}
+
+  .node{
+    position:absolute; transform:translate(-50%,-50%);
+    display:flex; flex-direction:column; align-items:center; gap:7px;
+    background:transparent; border:0; padding:6px; cursor:pointer; color:var(--ink);
+  }
+  .glyph{position:relative; width:40px; height:40px; display:grid; place-items:center;
+    background:var(--elev); border-radius:50%; transition:transform .15s, box-shadow .15s}
+  .glyph.seed{background:var(--teal); clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%); border-radius:0}
+  .glyph.seed::after{content:""; width:14px; height:14px; background:rgba(13,21,32,.55);
+    clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+  .glyph.public{border:2px solid var(--st)}
+  .glyph.nat{border:2px dashed var(--st); background:transparent}
+  .node:hover .glyph{transform:scale(1.08)}
+  .node.sel .glyph{box-shadow:0 0 0 3px rgba(59,196,204,.28), 0 0 18px rgba(59,196,204,.35)}
+  .node:focus-visible{outline:none}
+  .node:focus-visible .glyph{box-shadow:0 0 0 3px var(--teal)}
+  .node .dot{position:absolute; top:-1px; right:-1px; width:11px; height:11px; border-radius:50%;
+    border:2px solid var(--bg)}
+  .node .dot.online{background:var(--green)} .node .dot.degraded{background:var(--amber)}
+  .node .dot.offline{background:var(--red)}
+  .node .dot.online{animation:beat 2.2s ease-in-out infinite}
+  .node .lbl{font-family:var(--mono); font-size:12px; text-align:center; line-height:1.25}
+  .node .lbl .ip{display:block; color:var(--faint); font-size:10.5px; margin-top:1px}
+  .node.off{opacity:.62}
+
+  /* ---------- detail rail ---------- */
+  .d-head{display:flex; align-items:flex-start; gap:10px; margin-bottom:4px}
+  .d-title{font-family:var(--mono); font-size:17px; font-weight:600}
+  .d-sub{color:var(--faint); font-size:12px; margin-top:1px}
+  .chip{font-size:11px; letter-spacing:.04em; padding:3px 9px; border-radius:99px;
+    border:1px solid var(--line); color:var(--dim); background:var(--panel); white-space:nowrap}
+  .chip.role{color:var(--teal); border-color:rgba(59,196,204,.4)}
+  .pill{display:inline-flex; align-items:center; gap:7px; font-size:12px; padding:4px 11px;
+    border-radius:99px; margin-top:12px}
+  .pill.online{background:rgba(63,185,80,.12); color:#7ee08a; border:1px solid rgba(63,185,80,.35)}
+  .pill.degraded{background:rgba(217,154,43,.12); color:#f0c169; border:1px solid rgba(217,154,43,.35)}
+  .pill.offline{background:rgba(229,85,91,.12); color:#f08a8e; border:1px solid rgba(229,85,91,.35)}
+  .pill i{width:8px;height:8px;border-radius:50%;background:currentColor}
+
+  .note{margin-top:14px; font-size:12.5px; color:#f0c169; background:rgba(217,154,43,.08);
+    border:1px solid rgba(217,154,43,.25); border-left:3px solid var(--amber);
+    padding:9px 12px; border-radius:6px; line-height:1.4}
+
+  .fields{margin-top:16px; display:flex; flex-direction:column}
+  .field{display:flex; justify-content:space-between; align-items:center; gap:12px;
+    padding:9px 0; border-bottom:1px solid rgba(34,52,73,.5)}
+  .field .fk{color:var(--dim); font-size:12px; flex:0 0 auto}
+  .field .fv{font-family:var(--mono); font-size:12.5px; text-align:right; color:var(--ink); word-break:break-all}
+  .field .fv.muted{color:var(--faint)}
+  .keybtn{font-family:var(--mono); font-size:12px; color:var(--ink); background:var(--panel);
+    border:1px solid var(--line); border-radius:6px; padding:5px 9px; cursor:pointer; display:inline-flex; gap:8px; align-items:center}
+  .keybtn:hover{border-color:var(--teal-deep)}
+  .keybtn .cp{color:var(--faint); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase}
+  .keybtn.copied .cp{color:var(--green)}
+
+  .peers{margin-top:20px}
+  .peers h4{margin:0 0 10px; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); font-weight:600}
+  .peer{display:flex; align-items:center; gap:10px; padding:7px 8px; border-radius:7px; cursor:pointer}
+  .peer:hover{background:var(--panel)}
+  .peer .pd{width:8px;height:8px;border-radius:50%}
+  .peer .pd.online{background:var(--green)} .peer .pd.degraded{background:var(--amber)} .peer .pd.offline{background:var(--red)} .peer .pd.blocked{background:var(--red);opacity:.5}
+  .peer .pl{font-family:var(--mono); font-size:12.5px}
+  .peer .pip{font-family:var(--mono); font-size:11px; color:var(--faint); margin-left:auto}
+  .peer .pt{font-size:10.5px; color:var(--dim); letter-spacing:.03em}
+
+  /* ---------- table view ---------- */
+  .tableview{flex:1 1 auto; min-height:460px; border:1px solid var(--line); border-radius:var(--r);
+    background:var(--panel); overflow:hidden; display:flex; flex-direction:column}
+  .tblwrap{overflow:auto}
+  .tbl{width:100%; border-collapse:collapse; font-size:12.5px}
+  .tbl thead th{position:sticky; top:0; z-index:1; background:var(--elev); color:var(--faint);
+    font-weight:600; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+    text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); white-space:nowrap}
+  .tbl td{padding:11px 14px; border-bottom:1px solid rgba(34,52,73,.5); vertical-align:middle; white-space:nowrap}
+  .tbl .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+  .tbl tbody tr{cursor:pointer; transition:background .12s}
+  .tbl tbody tr:hover{background:var(--elev)}
+  .tbl tbody tr.sel{background:rgba(59,196,204,.08)}
+  .tbl tbody tr.sel td:first-child{box-shadow:inset 3px 0 0 var(--teal)}
+  .tbl .nodecell{display:inline-flex; align-items:center; gap:10px}
+  .tbl .g{width:14px; height:14px; flex:0 0 auto}
+  .tbl .g.seed{background:var(--teal); clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+  .tbl .g.public{border-radius:50%; border:2px solid currentColor}
+  .tbl .g.nat{border-radius:50%; border:2px dashed currentColor}
+  .tbl .st{display:inline-flex; align-items:center; gap:7px}
+  .tbl .st i{width:8px; height:8px; border-radius:50%}
+  .muteEP{color:var(--faint)}
+
+  @keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+  @keyframes beat{0%,100%{box-shadow:0 0 0 0 rgba(63,185,80,.5)}50%{box-shadow:0 0 0 4px rgba(63,185,80,0)}}
+  @media (prefers-reduced-motion:reduce){
+    .edge, .gossip i, .node .dot{animation:none!important}
+  }
+  @media (max-width:1000px){
+    .grid{grid-template-columns:1fr}
+    .rail-left{order:2} .stage{order:1} .rail-right{order:3}
+    .map{min-height:52vh}
+    .topbar{flex-wrap:wrap; gap:12px}
+  }
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="hex"></div>
+      <div><b>awg-mesh</b><small>control plane</small></div>
+    </div>
+    <div class="net-pill mono">CIDR <span id="cidr">100.64.0.0/10</span></div>
+    <div class="health" id="healthTop"></div>
+    <div class="grow"></div>
+    <div class="gossip"><i></i> gossip · синхр. 34с назад</div>
+    <div class="toggle" id="viewToggle">
+      <button class="on" data-view="map">Карта</button>
+      <button data-view="table">Таблица</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- left rail -->
+    <aside class="rail rail-left">
+      <div class="block">
+        <p class="kicker">Сеть</p>
+        <div class="stat"><span class="k">Ноды</span><span class="v" id="sNodes">—</span></div>
+        <div class="stat"><span class="k">Seed</span><span class="v teal">seed</span></div>
+        <div class="stat"><span class="k">Обфускация</span><span class="v">S4 · H1–H4</span></div>
+        <div class="stat"><span class="k">gossip</span><span class="v">60&nbsp;с</span></div>
+        <div class="stat"><span class="k">bootstrap</span><span class="v">tcp/51820</span></div>
+      </div>
+
+      <div class="block">
+        <p class="kicker">Здоровье</p>
+        <div class="rollup" id="rollup"></div>
+        <div class="legendrow"><span><span class="sw" style="background:var(--green)"></span>Онлайн</span><b id="cOn">0</b></div>
+        <div class="legendrow"><span><span class="sw" style="background:var(--amber)"></span>Деградация</span><b id="cDeg">0</b></div>
+        <div class="legendrow"><span><span class="sw" style="background:var(--red)"></span>Оффлайн</span><b id="cOff">0</b></div>
+      </div>
+
+      <div class="block">
+        <p class="kicker">Легенда</p>
+        <div class="leg">
+          <div class="row"><span class="g-seed"></span> seed — раздаёт mesh-IP</div>
+          <div class="row"><span class="g-pub"></span> с endpoint — инициируема</div>
+          <div class="row"><span class="g-nat"></span> без endpoint — initiator-only</div>
+          <div class="row"><span class="e"></span> активный туннель</div>
+          <div class="row"><span class="e deg"></span> degraded (DPI душит поток)</div>
+          <div class="row"><span class="e down"></span> сконфигурен, нода down</div>
+          <div class="row"><span class="e blk"></span> обе без endpoint — нет прямого пути</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- stage -->
+    <section class="stage">
+      <div class="map" id="map">
+        <svg class="edges" id="edges" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="tableview" id="tableview" hidden>
+        <div class="tblwrap">
+          <table class="tbl">
+            <thead><tr>
+              <th>Нода</th><th>Роль</th><th>mesh-IP</th><th>endpoint</th>
+              <th>порт</th><th>состояние</th><th>handshake</th><th>public key</th>
+            </tr></thead>
+            <tbody id="tblBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- detail rail -->
+    <aside class="rail rail-right" id="detail"></aside>
+  </main>
+</div>
+
+<script>
+const NET = {
+  cidr:"100.64.0.0/10",
+  nodes:[
+    {id:"seed", role:"seed",   ip:"100.64.0.1", endpoint:"203.0.113.10:51820",  port:51820, key:"kJ9xR2vT7mQ0aWpLzF4nB8hC1sD6yU3eXo7q7Aw=", state:"online",   hs:"12с",     x:50, y:49},
+    {id:"gw-1", role:"public", ip:"100.64.0.2", endpoint:"203.0.113.24:51820",  port:51820, key:"m2LfP8dQ0rZ5xN1kV9tG3wY7bC4hJ6sL0aE2uR8dQ0=", state:"online",   hs:"27с",     x:22, y:22},
+    {id:"gw-2", role:"public", ip:"100.64.0.3", endpoint:"198.51.100.7:51820",  port:51820, key:"pR4t1vNcZ8mK2xQ7wL5sB9dG3hY6fT0aJ1eU4oP1vNc=", state:"degraded", hs:"2м 41с",  x:80, y:24,
+      note:"DPI душит поток: handshake проходит, зашифрованный поток дропается. Кандидат на I1 (QUIC-SNI) / смену S4·H."},
+    {id:"laptop",  role:"nat",    ip:"100.64.0.4", endpoint:"",                     port:0,     key:"aQ7z5kLmX2pW8dN1vR4tG9sY3hB6cJ0eF7uK2oL5kLm=", state:"online",   hs:"44с",     x:20, y:77},
+    {id:"phone",  role:"nat",    ip:"100.64.0.5", endpoint:"",                     port:0,     key:"wE1s9pXdR3mZ7kQ2vL5tN8bG4hY0cJ6fT1aU3oD9pXd=", state:"offline",  hs:"8м 12с",  x:79, y:78}
+  ],
+  edges:[
+    {a:"seed", b:"gw-1", state:"active"},
+    {a:"seed", b:"gw-2", state:"degraded"},
+    {a:"seed", b:"laptop",  state:"active"},
+    {a:"gw-1", b:"laptop",  state:"active"},
+    {a:"seed", b:"phone",  state:"down"},
+    {a:"laptop",  b:"phone",  state:"blocked"}
+  ]
+};
+
+const STCOL = {online:"var(--green)", degraded:"var(--amber)", offline:"var(--red)"};
+const ROLE_RU = {seed:"seed", public:"с endpoint", nat:"без endpoint"};
+const byId = id => NET.nodes.find(n=>n.id===id);
+let selected = "seed";
+
+/* ---- render nodes ---- */
+const map = document.getElementById("map");
+NET.nodes.forEach(n=>{
+  const b = document.createElement("button");
+  b.className = "node" + (n.state==="offline" ? " off":"");
+  b.dataset.id = n.id;
+  b.style.left = n.x+"%"; b.style.top = n.y+"%";
+  b.style.setProperty("--st", STCOL[n.state]);
+  b.setAttribute("aria-label", n.id+", "+ROLE_RU[n.role]+", "+n.state);
+  b.innerHTML =
+    '<span class="glyph '+n.role+'"><span class="dot '+n.state+'"></span></span>'+
+    '<span class="lbl">'+n.id+'<span class="ip">'+n.ip+'</span></span>';
+  b.addEventListener("click", ()=>select(n.id));
+  map.appendChild(b);
+});
+
+/* ---- rollup / health ---- */
+function health(){
+  const c = {online:0, degraded:0, offline:0};
+  NET.nodes.forEach(n=>c[n.state]++);
+  return c;
+}
+(function fillHealth(){
+  const c = health();
+  document.getElementById("sNodes").textContent = NET.nodes.length;
+  document.getElementById("cOn").textContent = c.online;
+  document.getElementById("cDeg").textContent = c.degraded;
+  document.getElementById("cOff").textContent = c.offline;
+  const tot = NET.nodes.length;
+  document.getElementById("rollup").innerHTML =
+    '<i class="g" style="width:'+(c.online/tot*100)+'%"></i>'+
+    '<i class="a" style="width:'+(c.degraded/tot*100)+'%"></i>'+
+    '<i class="r" style="width:'+(c.offline/tot*100)+'%"></i>';
+  document.getElementById("healthTop").innerHTML =
+    '<span><span class="hdot green"></span><b>'+c.online+'</b> online</span>'+
+    '<span><span class="hdot amber"></span><b>'+c.degraded+'</b> degraded</span>'+
+    '<span><span class="hdot red"></span><b>'+c.offline+'</b> offline</span>';
+})();
+
+/* ---- edges + rings ---- */
+function draw(){
+  const w = map.clientWidth, h = map.clientHeight;
+  const svg = document.getElementById("edges");
+  svg.setAttribute("viewBox", "0 0 "+w+" "+h);
+  const P = {}; NET.nodes.forEach(n=> P[n.id] = {x:n.x/100*w, y:n.y/100*h});
+  const seed = P["seed"];
+  let s = "";
+  // радар-кольца от seed
+  [90,170,260].forEach(r=> s += '<circle class="ring" cx="'+seed.x+'" cy="'+seed.y+'" r="'+r+'"/>');
+  // рёбра (укорачиваем до края узла)
+  NET.edges.forEach(e=>{
+    const A=P[e.a], B=P[e.b]; const dx=B.x-A.x, dy=B.y-A.y; const L=Math.hypot(dx,dy)||1;
+    const r=30, ux=dx/L, uy=dy/L;
+    const x1=A.x+ux*r, y1=A.y+uy*r, x2=B.x-ux*r, y2=B.y-uy*r;
+    const hot = (e.a===selected||e.b===selected);
+    const cls = "edge "+e.state+(selected ? (hot?" hot":" dim"):"");
+    s += '<line class="'+cls+'" x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'"/>';
+  });
+  svg.innerHTML = s;
+}
+
+/* ---- detail panel ---- */
+function tunnelsOf(id){
+  return NET.edges.filter(e=>(e.a===id||e.b===id) && (e.state==="active"||e.state==="degraded"));
+}
+function neighborsOf(id){
+  return NET.edges.filter(e=>e.a===id||e.b===id).map(e=>{
+    const other = e.a===id ? e.b : e.a;
+    return {node:byId(other), edge:e.state};
+  });
+}
+const EDGE_RU = {active:"туннель", degraded:"degraded", down:"down", blocked:"нет пути"};
+function render(){
+  const n = byId(selected);
+  const tun = tunnelsOf(n.id).length;
+  const natEP = n.role==="nat";
+  const el = document.getElementById("detail");
+  const peers = neighborsOf(n.id).map(x=>{
+    const st = x.edge==="blocked" ? "blocked" : (x.edge==="down" ? "offline" : x.node.state);
+    return '<div class="peer" data-go="'+x.node.id+'">'+
+      '<span class="pd '+st+'"></span>'+
+      '<span class="pl">'+x.node.id+'</span>'+
+      '<span class="pt">'+EDGE_RU[x.edge]+'</span>'+
+      '<span class="pip">'+x.node.ip+'</span></div>';
+  }).join("");
+  el.innerHTML =
+    '<div class="d-head">'+
+      '<div class="grow"><div class="d-title">'+n.id+'</div>'+
+        '<div class="d-sub">узел mesh · '+n.hs+' назад handshake</div></div>'+
+      '<span class="chip role">'+ROLE_RU[n.role]+'</span>'+
+    '</div>'+
+    '<span class="pill '+n.state+'"><i></i>'+(n.state==="online"?"Онлайн":n.state==="degraded"?"Деградация":"Оффлайн")+'</span>'+
+    (n.note ? '<div class="note">'+n.note+'</div>' : '')+
+    '<div class="fields">'+
+      '<div class="field"><span class="fk">mesh-IP</span><span class="fv">'+n.ip+'</span></div>'+
+      '<div class="field"><span class="fk">endpoint</span><span class="fv '+(natEP?"muted":"")+'">'+(natEP?"— не объявлен":n.endpoint)+'</span></div>'+
+      '<div class="field"><span class="fk">listen port</span><span class="fv '+(n.port?"":"muted")+'">'+(n.port?"udp/"+n.port:"ephemeral")+'</span></div>'+
+      '<div class="field"><span class="fk">достижимость</span><span class="fv">'+(natEP?"initiator-only":"инициируема")+'</span></div>'+
+      '<div class="field"><span class="fk">туннели</span><span class="fv">'+tun+' активных</span></div>'+
+      '<div class="field"><span class="fk">public key</span>'+
+        '<button class="keybtn" id="keybtn" title="'+n.key+'"><span>'+n.key.slice(0,7)+'…'+n.key.slice(-5)+'</span><span class="cp">copy</span></button></div>'+
+    '</div>'+
+    '<div class="peers"><h4>Пиры ('+peers.length+')</h4>'+peers+'</div>';
+
+  document.querySelectorAll(".peer").forEach(p=> p.addEventListener("click", ()=>select(p.dataset.go)));
+  const kb = document.getElementById("keybtn");
+  kb.addEventListener("click", ()=>{
+    (navigator.clipboard?.writeText(n.key) || Promise.resolve()).finally(()=>{
+      kb.classList.add("copied"); kb.querySelector(".cp").textContent="скопировано";
+      setTimeout(()=>{kb.classList.remove("copied"); kb.querySelector(".cp").textContent="copy";},1400);
+    });
+  });
+}
+
+function select(id){
+  selected = id;
+  document.querySelectorAll(".node").forEach(el=> el.classList.toggle("sel", el.dataset.id===id));
+  document.querySelectorAll(".tbl tbody tr").forEach(tr=> tr.classList.toggle("sel", tr.dataset.id===id));
+  if(!document.getElementById("map").hidden) draw();
+  render();
+}
+
+/* ---- table view ---- */
+function buildTable(){
+  const body = document.getElementById("tblBody");
+  body.innerHTML = NET.nodes.map(n=>{
+    const c = STCOL[n.state];
+    const stRU = n.state==="online" ? "Онлайн" : n.state==="degraded" ? "Деградация" : "Оффлайн";
+    const ep = n.role==="nat" ? '<span class="muteEP">— не объявлен</span>' : n.endpoint;
+    const port = n.port ? "udp/"+n.port : '<span class="muteEP">ephemeral</span>';
+    return '<tr data-id="'+n.id+'"'+(n.id===selected ? ' class="sel"' : '')+'>'+
+      '<td><span class="nodecell"><span class="g '+n.role+'" style="color:'+c+'"></span><span class="mono">'+n.id+'</span></span></td>'+
+      '<td>'+ROLE_RU[n.role]+'</td>'+
+      '<td class="mono">'+n.ip+'</td>'+
+      '<td class="mono">'+ep+'</td>'+
+      '<td class="mono">'+port+'</td>'+
+      '<td><span class="st" style="color:'+c+'"><i style="background:currentColor"></i>'+stRU+'</span></td>'+
+      '<td class="mono">'+n.hs+' назад</td>'+
+      '<td class="mono">'+n.key.slice(0,7)+'…'+n.key.slice(-5)+'</td>'+
+    '</tr>';
+  }).join("");
+  body.querySelectorAll("tr").forEach(tr=> tr.addEventListener("click", ()=> select(tr.dataset.id)));
+}
+function setView(v){
+  const isMap = v==="map";
+  document.getElementById("map").hidden = !isMap;
+  document.getElementById("tableview").hidden = isMap;
+  document.querySelectorAll("#viewToggle button").forEach(b=> b.classList.toggle("on", b.dataset.view===v));
+  if(isMap) draw();
+}
+document.querySelectorAll("#viewToggle button").forEach(b=> b.addEventListener("click", ()=> setView(b.dataset.view)));
+
+/* init */
+buildTable();
+draw(); render();
+document.querySelector('.node[data-id="seed"]').classList.add("sel");
+window.addEventListener("resize", ()=>{ if(!document.getElementById("map").hidden) draw(); });
+</script>
