@@ -19,14 +19,15 @@ import (
 //
 // Возвращает (merged, changed, rejected, persist):
 //
-//	merged   — полный новый список для state.Peers (обновлённые endpoint/label/
-//	           IsSeed существующих peer'ов + refresh'нутые LastSeen).
+//	merged   — полный новый список для state.Peers (обновлённые endpoint/label
+//	           существующих peer'ов + refresh'нутые LastSeen). is_seed из gossip
+//	           НЕ применяется (см. ниже — он неаутентифицирован).
 //	changed  — что пушить в wg-device через UpdatePeer (новые peers + те, у кого
-//	           сменился endpoint). Pure refresh LastSeen / label / IsSeed в changed
+//	           сменился endpoint). Pure refresh LastSeen / label в changed
 //	           не идёт — на wg-маршрутизацию они не влияют.
 //	rejected — человекочитаемые причины отказа (для лога caller'ом).
 //	persist  — надо ли писать merged на диск. Это ОТДЕЛЬНЫЙ вопрос от changed:
-//	           label/IsSeed-обновления значимы для state, но не для wg-device, так
+//	           label-обновления значимы для state, но не для wg-device, так
 //	           что попадают в persist, но не в changed. Чистый refresh LastSeen в
 //	           persist НЕ идёт сознательно — иначе писали бы файл каждый gossip-цикл
 //	           (flash-wear на роутере); LastSeen долетит на диск с ближайшей реальной
@@ -38,6 +39,11 @@ import (
 // принадлежит ДРУГОМУ pubkey (коллизия → cryptokey-routing last-write-wins отдал
 // бы /32 атакующему). NodeIP существующих peer'ов через gossip не меняется
 // (матчим по pubkey), поэтому угон возможен только через «нового» peer'а.
+//
+// is_seed из gossip НЕ применяется вовсе (ни новому, ни существующему peer'у) —
+// seed-статус аутентифицирован только bootstrap-каналом (join) и локальным init.
+// Иначе самозванец объявил бы себя seed'ом и захватил flag-day-плоскость
+// (seedAuthorized → push /v1/params, /v1/obf). См. проход по local ниже.
 //
 // Себя из remote всегда отфильтровываем (selfPub); себя из local сохраняем как есть.
 //
@@ -117,18 +123,21 @@ func MergePeers(local, remote []state.Peer, tombstones []state.Tombstone, selfPu
 		if labelChanged {
 			updated.Label = r.Label
 		}
-		seedChanged := r.IsSeed != p.IsSeed
-		if seedChanged {
-			updated.IsSeed = r.IsSeed
-		}
+		// is_seed СОЗНАТЕЛЬНО не берём из gossip: seed-статус узнаётся только из
+		// bootstrap-response (join, Noise-аутентифицирован) и локального init. Иначе
+		// любая нода объявила бы про себя is_seed=true в своём peer-list'е → сосед
+		// смёрджил бы это → самозванец прошёл бы seedAuthorized (gossip/obf.go) и
+		// пушил flag-day POST /v1/params (согласованный разрыв mesh) и /v1/obf.
+		// `updated := p` сохраняет локальный IsSeed — и downgrade через gossip тоже
+		// невозможен. Единственный seed известен каждой ноде с init/join.
 		merged = append(merged, updated)
-		// changed → пуш в wg-device (только endpoint-смена; label/IsSeed на wg не влияют).
+		// changed → пуш в wg-device (только endpoint-смена; label на wg не влияет).
 		if endpointChanged {
 			changed = append(changed, updated)
 		}
-		// persist → запись на диск: любое значимое изменение (endpoint/label/IsSeed),
-		// но НЕ чистый LastSeen-refresh (иначе писали бы файл каждый цикл — flash-wear).
-		if endpointChanged || labelChanged || seedChanged {
+		// persist → запись на диск: значимое изменение (endpoint/label), но НЕ чистый
+		// LastSeen-refresh (иначе писали бы файл каждый цикл — flash-wear).
+		if endpointChanged || labelChanged {
 			persist = true
 		}
 	}
@@ -165,8 +174,10 @@ func MergePeers(local, remote []state.Peer, tombstones []state.Tombstone, selfPu
 			PublicKey: r.PublicKey,
 			Endpoint:  endpoint,
 			NodeIP:    r.NodeIP,
-			IsSeed:    r.IsSeed,
-			LastSeen:  now,
+			// НЕ доверяем is_seed из gossip (см. проход по local выше): новые узлы
+			// приходят только не-seed'ами. Единственный seed известен с init/join.
+			IsSeed:   false,
+			LastSeen: now,
 		}
 		merged = append(merged, newP)
 		changed = append(changed, newP)

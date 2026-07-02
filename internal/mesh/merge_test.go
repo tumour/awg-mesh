@@ -99,23 +99,87 @@ func TestMergeLabelChangeNotPushedButPersisted(t *testing.T) {
 	}
 }
 
-// IsSeed-only изменение — тоже не в device, но персистится.
-func TestMergeIsSeedChangePersisted(t *testing.T) {
+// АДВЕРСАРИАЛЬНЫЙ: обычная нода в своём gossip-ответе объявляет про СЕБЯ
+// is_seed=true. MergePeers НЕ должен присваивать seed-статус из недоверенного
+// gossip — иначе самозванец проходит seedAuthorized (gossip/obf.go) и пушит
+// flag-day POST /v1/params (согласованный разрыв mesh) и /v1/obf. Источник
+// истины по is_seed — ТОЛЬКО bootstrap-response (join, Noise-аутентифицирован)
+// и локальный init; gossip-поле is_seed не доверяем.
+func TestMergeIgnoresGossipedSeedClaimOnExistingPeer(t *testing.T) {
 	local := []state.Peer{
 		{PublicKey: "B", Endpoint: "h:1", NodeIP: "100.64.0.3", IsSeed: false},
 	}
-	remote := []state.Peer{
+	remote := []state.Peer{ // B врёт, что он seed
 		{PublicKey: "B", Endpoint: "h:1", NodeIP: "100.64.0.3", IsSeed: true},
 	}
 	merged, changed, _, persist := MergePeers(local, remote, nil, selfKey, testCIDR)
-	if !merged[0].IsSeed {
-		t.Fatalf("IsSeed not merged: %+v", merged[0])
+	if merged[0].IsSeed {
+		t.Fatalf("gossiped is_seed=true MUST be ignored for existing peer, got seed: %+v", merged[0])
 	}
 	if len(changed) != 0 {
-		t.Fatalf("IsSeed-only must not be pushed to device, got %+v", changed)
+		t.Fatalf("is_seed-only claim must not touch device, got %+v", changed)
+	}
+	if persist {
+		t.Fatal("ignored is_seed claim must not trigger a disk write")
+	}
+}
+
+// Смешанный апдейт: existing peer одним gossip-ответом прислал легитимную смену
+// endpoint И вражеский is_seed=true. Фильтрация — по полю, не по ответу целиком:
+// endpoint применяется (merged+changed+persist), seed-клейм игнорируется.
+func TestMergeAppliesEndpointButIgnoresSeedClaimInSameUpdate(t *testing.T) {
+	local := []state.Peer{
+		{PublicKey: "B", Endpoint: "old.host:1", NodeIP: "100.64.0.3", IsSeed: false},
+	}
+	remote := []state.Peer{ // B двигает endpoint и заодно врёт, что он seed
+		{PublicKey: "B", Endpoint: "new.host:2", NodeIP: "100.64.0.3", IsSeed: true},
+	}
+	merged, changed, _, persist := MergePeers(local, remote, nil, selfKey, testCIDR)
+	if merged[0].Endpoint != "new.host:2" {
+		t.Fatalf("legit endpoint change must apply, got %+v", merged[0])
+	}
+	if merged[0].IsSeed {
+		t.Fatalf("seed claim must be ignored even alongside legit changes: %+v", merged[0])
+	}
+	if len(changed) != 1 || changed[0].Endpoint != "new.host:2" {
+		t.Fatalf("endpoint change must be pushed to device, got %+v", changed)
+	}
+	if changed[0].IsSeed {
+		t.Fatalf("device push must not carry the seed claim: %+v", changed[0])
 	}
 	if !persist {
-		t.Fatal("IsSeed-only change MUST set persist=true")
+		t.Fatal("endpoint change MUST set persist=true")
+	}
+}
+
+// Новый пир, впервые увиденный ЧЕРЕЗ gossip, тоже не может назначить себя seed:
+// новые узлы приходят только не-seed'ами (единственный seed известен с init/join).
+func TestMergeIgnoresGossipedSeedClaimOnNewPeer(t *testing.T) {
+	local := []state.Peer{{PublicKey: selfKey, NodeIP: "100.64.0.2"}}
+	remote := []state.Peer{ // впервые видим C, и он врёт про seed
+		{PublicKey: "C", Endpoint: "h:2", NodeIP: "100.64.0.9", IsSeed: true},
+	}
+	merged, _, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
+	for _, p := range merged {
+		if p.PublicKey == "C" && p.IsSeed {
+			t.Fatalf("new gossiped peer MUST NOT be trusted as seed: %+v", p)
+		}
+	}
+}
+
+// РЕГРЕССИЯ/устойчивость: локальный seed (узнан из bootstrap) НЕ должен терять
+// статус, даже если remote — по ошибке или злонамеренно — прислал is_seed=false.
+// is_seed берётся только из local, поэтому downgrade через gossip невозможен.
+func TestMergeKeepsLocalSeedDespiteGossipDowngrade(t *testing.T) {
+	local := []state.Peer{
+		{PublicKey: "S", Endpoint: "h:1", NodeIP: "100.64.0.1", IsSeed: true},
+	}
+	remote := []state.Peer{
+		{PublicKey: "S", Endpoint: "h:1", NodeIP: "100.64.0.1", IsSeed: false},
+	}
+	merged, _, _, _ := MergePeers(local, remote, nil, selfKey, testCIDR)
+	if !merged[0].IsSeed {
+		t.Fatalf("local seed status MUST survive gossip downgrade, got %+v", merged[0])
 	}
 }
 
