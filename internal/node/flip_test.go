@@ -257,6 +257,19 @@ func TestAbortIfStuck(t *testing.T) {
 	})
 }
 
+// startLoop запускает фоновый ticker-цикл и через t.Cleanup гарантирует его
+// полное завершение (join) ДО остальных cleanup'ов — в частности, до RemoveAll
+// от t.TempDir. Голый cancel без join оставляет in-flight tick, который
+// дописывает state.json в уже удаляемый каталог → флак «directory not empty»
+// (ловили в CI). Циклы зовут tick синхронно, так что возврат = записей нет.
+func startLoop(t *testing.T, loop func(context.Context)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); loop(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+}
+
 // waitFor поллит cond до 2с (через store — без гонки на полях fake-device).
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
@@ -293,9 +306,7 @@ func TestRunParamFlip(t *testing.T) {
 	store := storeWithPending(t, &state.PendingParams{Version: 2, ApplyAt: applyAt})
 	// наблюдали коммит задолго до ApplyAt → гард пройден
 	f := flipperFor(store, &fakeDevice{}, 10*time.Millisecond, time.Hour, 2, applyAt.Add(-time.Hour))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go runParamFlip(ctx, f, 5*time.Millisecond)
+	startLoop(t, func(ctx context.Context) { runParamFlip(ctx, f, 5*time.Millisecond) })
 
 	waitFor(t, func() bool { s, _ := store.Read(); return s.Pending == nil })
 }

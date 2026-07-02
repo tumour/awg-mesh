@@ -169,9 +169,7 @@ func TestRunParamPush_CommitsThenStops(t *testing.T) {
 	store := seedStore(t, announced())
 	push := &fakeParamPush{applied: 1}
 	p := newTestParamPusher(store, push, 30*time.Second, time.Second)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go runParamPush(ctx, p, 2*time.Millisecond)
+	startLoop(t, func(ctx context.Context) { runParamPush(ctx, p, 2*time.Millisecond) })
 
 	waitFor(t, func() bool { s, _ := store.Read(); return s.Pending != nil && !s.Pending.ApplyAt.IsZero() })
 }
