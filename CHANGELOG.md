@@ -3,6 +3,31 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
+## [0.7.1] — 2026-07-02
+
+Security-фикс control plane: закрыт спуф seed-статуса через gossip — обычная нода
+больше не может объявить себя seed'ом и получить доступ к push-каналам управления
+сетью. Плюс supply-chain-харднинг release-конвейера (SHA-пины actions, Dependabot).
+Data plane и wire-протоколы не затронуты, обновление обратно совместимо.
+
+### Security
+- **`is_seed` из gossip больше не доверяется.** Раньше `MergePeers` копировал флаг
+  `is_seed` из gossip-ответа: любая нода могла объявить себя seed'ом в своём
+  peer-list'е, сосед мерджил это в state — и самозванец проходил проверку
+  `seedAuthorized`, получая право пушить flag-day `POST /v1/params` (согласованный
+  разрыв всей сети) и `/v1/obf`. Теперь seed-статус узнаётся ТОЛЬКО из
+  Noise-аутентифицированного bootstrap-response (join) и локального `init`; gossip
+  не может ни назначить его (существующему или новому peer'у), ни снять
+  (downgrade локального seed'а тоже игнорируется).
+- **Supply-chain-харднинг CI/Release.** GitHub Actions пиннуты по commit-SHA
+  (мажорный тег `vX` мутабелен — угон аккаунта action'а означал бы подпись
+  зловредного пакета нашим release-ключом); `nfpm` пиннут на v2.47.0 вместо
+  `@latest` — версия тула в подписанном артефакте должна быть детерминирована.
+
+### Added
+- **Dependabot** (weekly): двигает SHA-пины actions (вместе с human-читаемым
+  комментарием версии) и Go-зависимости — пины не застаивают security-патчи.
+
 ## [0.7.0] — 2026-07-01
 
 Веб-морда: read-only HTTP-API и живой дашборд сети на seed. meshd поднимает
@@ -470,6 +495,10 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.7.1]: https://github.com/tumour/awg-mesh/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/tumour/awg-mesh/compare/v0.6.6...v0.7.0
+[0.6.6]: https://github.com/tumour/awg-mesh/compare/v0.6.5...v0.6.6
+[0.6.5]: https://github.com/tumour/awg-mesh/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/tumour/awg-mesh/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/tumour/awg-mesh/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/tumour/awg-mesh/compare/v0.6.1...v0.6.2
