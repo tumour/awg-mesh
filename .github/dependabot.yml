@@ -19,3 +19,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: deps
+    ignore:
+      # У апстрима немонотонная история тегов: линейка 1.x (последний v1.0.4,
+      # 2025-07) СТАРШЕ семверно, но СТАРЕЕ по коду, чем актуальная 0.2.x
+      # (v0.2.19 — 2026-06). Без ignore Dependabot вечно предлагает «апгрейд»
+      # 0.2.x → 1.0.4, который на деле — даунгрейд ядра data plane на год назад.
+      - dependency-name: github.com/amnezia-vpn/amneziawg-go
+        versions: ["1.x"]
