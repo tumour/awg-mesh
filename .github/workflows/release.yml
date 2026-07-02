@@ -16,18 +16,25 @@ jobs:
       feed: ${{ steps.prep.outputs.feed }}
       apt: ${{ steps.prep-apt.outputs.apt }}
     steps:
-      - uses: actions/checkout@v4
+      # Actions пиннуты по commit-SHA (мажорный тег vX мутабелен). Этот workflow
+      # держит секреты подписи (APK/APT) и собирает пакеты для self-upgrade всех
+      # нод — угон тега здесь = подпись зловредного пакета нашим ключом. SHA-пин
+      # закрывает вектор. Комментарий = human-версия, Dependabot двигает оба.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0   # для git describe в Makefile
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
 
       - name: install nfpm
         run: |
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          # Пиннем версию, не @latest: nfpm собирает пакеты, которые подписываются
+          # нашим ключом и разъезжаются на все ноды — недетерминированная версия
+          # тула в подписанном артефакте недопустима. Обновлять осознанно.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: install envsubst
@@ -72,7 +79,7 @@ jobs:
           echo "--- release notes ---"; cat RELEASE_NOTES.md
 
       - name: create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           body_path: RELEASE_NOTES.md
           files: |
@@ -161,7 +168,7 @@ jobs:
 
       - name: upload Pages artifact
         if: steps.prep.outputs.feed == '1' || steps.prep-apt.outputs.apt == '1'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: ./public
 
@@ -181,4 +188,4 @@ jobs:
     steps:
       - name: deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

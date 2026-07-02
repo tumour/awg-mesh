@@ -1,0 +1,21 @@
+# Dependabot: автоматически двигает пиннутые версии/SHA (см. workflow'ы —
+# actions пиннуты по commit-SHA; Dependabot обновляет и SHA, и комментарий # vX,
+# так что пины не застаивают security-патчи). gomod — проактивно к govulncheck.
+version: 2
+updates:
+  # GitHub Actions в .github/workflows/* (SHA-пины checkout/setup-go/nfpm-actions).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Go-зависимости (крипто-VPN — обновления безопасности важны; govulncheck в CI
+  # ловит уже вызываемые CVE, Dependabot подтягивает фиксы проактивно).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
