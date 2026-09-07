@@ -61,3 +61,38 @@ func TestApplyParamsAcceptedByDevice(t *testing.T) {
 		}
 	}
 }
+
+// dnsMimicI1 — I1 в виде DNS-ответа (txid случайный, flags 0x8580, вопрос A для
+// icloud.com, ответ A). Реальный рабочий spec, формат CPS amneziawg-go.
+const dnsMimicI1 = "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>"
+
+// ValidateObfSpec — оператор задаёт I1 сырой строкой (set-params --i1). Кривой spec
+// НЕЛЬЗЯ пускать в state: seed применит его себе, раздаст всем, а на рестарте Configure
+// каждой ноды упадёт на IpcSet → mesh-wide мина. Валидация — настоящим парсером
+// amneziawg-go (in-memory device), а не своим regex'ом, чтобы не разъехаться с upstream.
+func TestValidateObfSpec(t *testing.T) {
+	quic, err := awgparams.GenerateQUICInitialObf("example.com", strings.NewReader(strings.Repeat("x", 64)))
+	if err != nil {
+		t.Fatalf("generate quic I1: %v", err)
+	}
+	cases := []struct {
+		name    string
+		spec    string
+		wantErr bool
+	}{
+		{"DNS-мимик (рабочий оператора)", dnsMimicI1, false},
+		{"QUIC-мимик (наш генератор)", quic, false},
+		{"неизвестный тег", "<x 5>", true},
+		{"мусор без тегов", "hello", true},
+		{"пустая строка", "", true},
+		{"битый hex", "<b 0xZZ>", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateObfSpec(tc.spec)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateObfSpec(%q) err = %v, wantErr %v", tc.spec, err, tc.wantErr)
+			}
+		})
+	}
+}

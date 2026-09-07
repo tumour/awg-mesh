@@ -177,3 +177,65 @@ func TestCmdSetParams(t *testing.T) {
 		}
 	})
 }
+
+// set-params --i1: сырой I1-spec оператора раздаётся всем нодам как есть (тот же
+// active-push, что и --sni). Кривой spec отвергается ДО записи в state.
+func TestCmdSetParams_RawI1(t *testing.T) {
+	const raw = "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>"
+
+	t.Run("валидный --i1 бампит политику и применяет seed'у", func(t *testing.T) {
+		sf := filepath.Join(t.TempDir(), "seed.json")
+		st0 := &state.State{NodeLabel: "s", IsSeed: true, AwgParams: validCur(),
+			ObfPolicy: &state.ObfPolicy{SNI: "7-zip.org", Version: 4}, ObfVersion: 4}
+		st0.LocalObf.I1 = "<b 0xquic>"
+		if err := st0.Save(sf); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmdSetParams([]string{"--state-file", sf, "--i1", raw}); err != nil {
+			t.Fatalf("cmdSetParams --i1: %v", err)
+		}
+		s, _ := state.Load(sf)
+		if s.ObfPolicy == nil || s.ObfPolicy.I1 != raw || s.ObfPolicy.SNI != "" || s.ObfPolicy.Version != 5 {
+			t.Fatalf("ObfPolicy = %+v, want {I1:raw SNI:\"\" Version:5}", s.ObfPolicy)
+		}
+		if s.LocalObf.I1 != raw || s.ObfVersion != 5 {
+			t.Errorf("seed не применил себе: LocalObf.I1=%q ObfVersion=%d", s.LocalObf.I1, s.ObfVersion)
+		}
+		if s.Pending != nil {
+			t.Errorf("--i1 не должен анонсировать flag-day: Pending=%+v", s.Pending)
+		}
+	})
+
+	t.Run("невалидный --i1 отвергается, state не тронут", func(t *testing.T) {
+		sf := filepath.Join(t.TempDir(), "seed.json")
+		st0 := &state.State{NodeLabel: "s", IsSeed: true, AwgParams: validCur(),
+			ObfPolicy: &state.ObfPolicy{SNI: "7-zip.org", Version: 4}, ObfVersion: 4}
+		st0.LocalObf.I1 = "<b 0xquic>"
+		if err := st0.Save(sf); err != nil {
+			t.Fatal(err)
+		}
+		err := cmdSetParams([]string{"--state-file", sf, "--i1", "<x 5>"})
+		if err == nil || !strings.Contains(err.Error(), "I1") {
+			t.Fatalf("ожидал отказ по невалидному I1, получил: %v", err)
+		}
+		s, _ := state.Load(sf)
+		if s.ObfPolicy.Version != 4 || s.ObfPolicy.SNI != "7-zip.org" || s.LocalObf.I1 != "<b 0xquic>" || s.ObfVersion != 4 {
+			t.Fatalf("state изменён после отказа: policy=%+v local=%q ver=%d", s.ObfPolicy, s.LocalObf.I1, s.ObfVersion)
+		}
+	})
+
+	t.Run("--i1 и --sni взаимоисключающи", func(t *testing.T) {
+		sf := filepath.Join(t.TempDir(), "seed.json")
+		if err := (&state.State{NodeLabel: "s", IsSeed: true, AwgParams: validCur()}).Save(sf); err != nil {
+			t.Fatal(err)
+		}
+		err := cmdSetParams([]string{"--state-file", sf, "--i1", raw, "--sni", "7-zip.org"})
+		if err == nil {
+			t.Fatal("ожидал ошибку на --i1 вместе с --sni")
+		}
+		s, _ := state.Load(sf)
+		if s.ObfPolicy != nil {
+			t.Fatalf("политика записана несмотря на конфликт флагов: %+v", s.ObfPolicy)
+		}
+	})
+}

@@ -97,13 +97,18 @@ type PendingParams struct {
 	ApplyAt time.Time        `json:"apply_at"` // UTC, момент синхронного применения
 }
 
-// ObfPolicy — политика obf-обхода на seed: какой SNI вшивать в раздаваемый per-node I1.
-// Живёт ТОЛЬКО в state seed'а — SNI не попадает ни в wire, ни в state нод (ноды получают
-// уже готовый I1). Version монотонно растёт при каждой смене SNI.
+// ObfPolicy — политика obf-обхода на seed: либо SNI (seed генерит per-node QUIC-мимик
+// I1), либо сырой I1-spec оператора (раздаётся всем как есть, set-params --i1). Ровно одно
+// из двух. Живёт ТОЛЬКО в state seed'а — ноды получают уже готовый I1. Version монотонно
+// растёт при каждой смене политики.
 type ObfPolicy struct {
-	SNI     string `json:"sni"`
+	SNI     string `json:"sni,omitempty"`
+	I1      string `json:"i1,omitempty"`
 	Version uint64 `json:"version"`
 }
+
+// Empty — политика не задана (нечего раздавать).
+func (o *ObfPolicy) Empty() bool { return o == nil || (o.SNI == "" && o.I1 == "") }
 
 // Peer — другая нода в mesh-сети, известная нам.
 type Peer struct {

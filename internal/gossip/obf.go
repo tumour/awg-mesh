@@ -10,6 +10,7 @@ import (
 
 	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
+	"github.com/tumour/awg-mesh/internal/wg"
 )
 
 // Active-push раздаваемого seed'ом obf (per-node CPS-пакет I1, мимикрия под QUIC+SNI).
@@ -80,6 +81,13 @@ func (s *Server) handleObf(w http.ResponseWriter, r *http.Request) {
 	if !seedAuthorized(st.Peers, srcIP) {
 		s.log.Warn("rejected obf-push from non-seed", "src", srcIP)
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Строго ПОСЛЕ авторизации: валидация поднимает in-memory device — не для чужих.
+	// Кривой spec в state = падение Configure на следующем рестарте. Отказываем до записи.
+	if err := wg.ValidateObfSpec(push.I1); err != nil {
+		s.log.Warn("rejected obf-push with invalid I1", "err", err)
+		http.Error(w, "invalid obf spec", http.StatusBadRequest)
 		return
 	}
 	if _, err := s.store.Update(func(st *state.State) error {

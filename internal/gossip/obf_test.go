@@ -64,7 +64,7 @@ func TestHandleObf_IdempotentSameOrOlder(t *testing.T) {
 
 	for _, v := range []uint64{5, 4} {
 		rec := httptest.NewRecorder()
-		srv.handleObf(rec, obfReq(t, "100.64.0.1", ObfPush{Version: v, I1: "<b 0xnew>"}))
+		srv.handleObf(rec, obfReq(t, "100.64.0.1", ObfPush{Version: v, I1: "<b 0x1e>"}))
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("v=%d code = %d, want 204", v, rec.Code)
 		}
@@ -115,5 +115,29 @@ func TestHandleObf_RejectsWrongMethod(t *testing.T) {
 	srv.handleObf(rec, httptest.NewRequest(http.MethodGet, "/v1/obf", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("code = %d, want 405", rec.Code)
+	}
+}
+
+// Кривой I1 от seed → 400, state не тронут. Нода защищает себя сама: принятый в state
+// невалидный spec уронил бы Configure на следующем рестарте (мина через push).
+func TestHandleObf_RejectsInvalidSpec(t *testing.T) {
+	st0 := stateWithSeed("100.64.0.2")
+	st0.ObfVersion = 2
+	st0.LocalObf.I1 = "<b 0xbeef>"
+	store := saveState(t, st0)
+	srv := NewServer("100.64.0.2", DefaultPort, store, discardLogger())
+
+	rec := httptest.NewRecorder()
+	srv.handleObf(rec, obfReq(t, "100.64.0.1", ObfPush{Version: 9, I1: "<x 5>"}))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	st, err := store.Read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if st.ObfVersion != 2 || st.LocalObf.I1 != "<b 0xbeef>" {
+		t.Fatalf("state изменён кривым push'ем: version=%d i1=%q", st.ObfVersion, st.LocalObf.I1)
 	}
 }

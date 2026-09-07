@@ -143,3 +143,35 @@ func TestObfPusher_NoPolicyNoPush(t *testing.T) {
 		t.Fatalf("без политики не должно быть push'ей: %d", push.count())
 	}
 }
+
+// Политика с сырым I1 (set-params --i1): pusher раздаёт его ВСЕМ как есть, генератор
+// из SNI не трогает вовсе. Один и тот же spec на всех нодах — осознанно: это рабочий
+// образец оператора, per-node уникальность тут не нужна.
+func TestObfPusher_RawI1PushedVerbatim(t *testing.T) {
+	const raw = "<r 2><b 0x858000010001>"
+	st := &state.State{
+		PublicKey: "SELF", NodeIP: "100.64.0.1",
+		Peers: []state.Peer{
+			{Label: "a", PublicKey: "A", NodeIP: "100.64.0.2"},
+			{Label: "b", PublicKey: "B", NodeIP: "100.64.0.3"},
+		},
+		ObfPolicy: &state.ObfPolicy{I1: raw, Version: 7},
+	}
+	push := &recordingPush{}
+	p := newObfPusher(t, st, push)
+	p.genI1 = func(sni string) (string, error) {
+		t.Fatalf("генератор из SNI вызван при сырой политике (sni=%q)", sni)
+		return "", nil
+	}
+
+	p.tick(context.Background())
+
+	if push.count() != 2 {
+		t.Fatalf("push'ей = %d, want 2", push.count())
+	}
+	for _, c := range push.calls {
+		if c.I1 != raw || c.Version != 7 {
+			t.Errorf("push = %+v, want I1=%q version=7", c, raw)
+		}
+	}
+}

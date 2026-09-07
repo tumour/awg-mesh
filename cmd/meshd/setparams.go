@@ -11,6 +11,7 @@ import (
 	"github.com/tumour/awg-mesh/internal/awgparams"
 	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/state"
+	"github.com/tumour/awg-mesh/internal/wg"
 )
 
 // cmdSetParams — ЕДИНАЯ команда конфигурирования mesh, запускается ТОЛЬКО на seed
@@ -31,6 +32,7 @@ func cmdSetParams(args []string) error {
 	fs := flag.NewFlagSet("set-params", flag.ExitOnError)
 	stateFlag := fs.String("state-file", state.DefaultPath, "path to state file")
 	sni := fs.String("sni", "", "обход DPI: домен для per-node I1 (QUIC-мимик); seed раздаёт всем нодам")
+	rawI1 := fs.String("i1", "", "обход DPI: сырой I1-spec (CPS: <b 0x..><r N>...), раздаётся всем нодам как есть; взаимоисключим с --sni")
 	regenerate := fs.Bool("regenerate", false, "сгенерировать свежий случайный набор сетевых params (ротация всего)")
 	s1 := fs.Int("s1", 0, "S1: padding handshake-init")
 	s2 := fs.Int("s2", 0, "S2: padding handshake-response")
@@ -54,14 +56,26 @@ func cmdSetParams(args []string) error {
 		return fmt.Errorf("set-params запускается только на seed (конфиг раздаёт seed) — эта нода regular")
 	}
 
-	// obf-обход: задаём SNI → seed бампит политику, применяет свой I1 и раздаёт per-node
-	// I1 всем нодам (active-push). I1 не рвёт туннель → strand невозможен.
+	// obf-обход: SNI → seed генерит per-node QUIC-мимик I1; --i1 → сырой spec оператора
+	// как есть. В обоих случаях seed бампит политику, применяет I1 себе и раздаёт всем
+	// нодам (active-push). I1 не рвёт туннель → strand невозможен.
+	if *sni != "" && *rawI1 != "" {
+		return fmt.Errorf("--sni и --i1 взаимоисключающи: либо генерация из SNI, либо сырой spec")
+	}
 	if *sni != "" {
 		version, err := setObfPolicy(store, *sni, rand.Reader)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("✓ obf-обход обновлён (версия %d) → seed раздаёт per-node I1 всем нодам (active-push, ретрай до подтверждения)\n", version)
+		return nil
+	}
+	if *rawI1 != "" {
+		version, err := setObfPolicyRaw(store, *rawI1)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("✓ obf-обход обновлён (версия %d) → seed раздаёт этот I1 всем нодам как есть (active-push, ретрай до подтверждения)\n", version)
 		return nil
 	}
 
@@ -75,7 +89,7 @@ func cmdSetParams(args []string) error {
 		return fmt.Errorf("--regenerate и явные поля params взаимоисключающи (regenerate задаёт весь набор сам)")
 	}
 	if !*regenerate && ov.empty() {
-		return fmt.Errorf("нечего менять: задайте --s1..--s4/--jc/--jmin/--jmax/--h1..--h4, либо --regenerate, либо --sni")
+		return fmt.Errorf("нечего менять: задайте --s1..--s4/--jc/--jmin/--jmax/--h1..--h4, либо --regenerate, либо --sni/--i1")
 	}
 
 	var pending *state.PendingParams
@@ -239,14 +253,31 @@ func setObfPolicy(store *state.Store, sni string, rng io.Reader) (uint64, error)
 	if err != nil {
 		return 0, fmt.Errorf("generate obf I1: %w", err)
 	}
+	return bumpObfPolicy(store, state.ObfPolicy{SNI: sni}, i1)
+}
+
+// setObfPolicyRaw — политика «сырой I1 оператора»: раздаётся всем как есть. Spec
+// проверяется настоящим парсером amneziawg-go ДО записи: кривой I1 в state seed'а
+// ушёл бы push'ем всем нодам и уронил Configure на их следующем рестарте.
+func setObfPolicyRaw(store *state.Store, i1 string) (uint64, error) {
+	if err := wg.ValidateObfSpec(i1); err != nil {
+		return 0, fmt.Errorf("--i1 отвергнут (I1 невалиден, state не тронут): %w", err)
+	}
+	return bumpObfPolicy(store, state.ObfPolicy{I1: i1}, i1)
+}
+
+// bumpObfPolicy монотонно бампит версию политики и сразу применяет seed'у его собственный
+// I1 (reconciler доведёт до device). Остальным раздаст obfPusher.
+func bumpObfPolicy(store *state.Store, pol state.ObfPolicy, selfI1 string) (uint64, error) {
 	var version uint64
 	if _, err := store.Update(func(st *state.State) error {
 		version = 1
 		if st.ObfPolicy != nil {
 			version = st.ObfPolicy.Version + 1
 		}
-		st.ObfPolicy = &state.ObfPolicy{SNI: sni, Version: version}
-		st.LocalObf.I1 = i1
+		pol.Version = version
+		st.ObfPolicy = &pol
+		st.LocalObf.I1 = selfI1
 		st.ObfVersion = version
 		return nil
 	}); err != nil {

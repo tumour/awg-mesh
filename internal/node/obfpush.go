@@ -54,7 +54,7 @@ func (p *obfPusher) tick(ctx context.Context) {
 		p.log.Error("obf-push: reload state failed", "err", err)
 		return
 	}
-	if st.ObfPolicy == nil || st.ObfPolicy.SNI == "" {
+	if st.ObfPolicy.Empty() {
 		return // политика обхода не задана — раздавать нечего
 	}
 	version := st.ObfPolicy.Version
@@ -65,7 +65,7 @@ func (p *obfPusher) tick(ctx context.Context) {
 		if p.confirmed[peer.PublicKey] >= version {
 			continue // уже держит текущую версию
 		}
-		i1, err := p.genI1(st.ObfPolicy.SNI)
+		i1, err := p.policyI1(st.ObfPolicy)
 		if err != nil {
 			p.log.Error("obf-push: generate I1 failed", "err", err)
 			continue
@@ -76,6 +76,15 @@ func (p *obfPusher) tick(ctx context.Context) {
 		}
 		p.confirmed[peer.PublicKey] = version
 	}
+}
+
+// policyI1 — I1 для раздачи по политике: сырой spec оператора как есть, иначе per-node
+// генерация из SNI (уникальность per-node — DPI не напишет один rule).
+func (p *obfPusher) policyI1(pol *state.ObfPolicy) (string, error) {
+	if pol.I1 != "" {
+		return pol.I1, nil
+	}
+	return p.genI1(pol.SNI)
 }
 
 // runObfPush тикает obfPusher.tick до отмены ctx (seed-only).
