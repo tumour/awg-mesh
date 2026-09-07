@@ -3,7 +3,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
-## [Unreleased]
+## [0.7.2] — 2026-09-08
 
 ### Added
 - **`set-params --i1 <spec>` — раздача сырого I1 оператора.** Рядом с `--sni`
@@ -513,6 +513,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.7.2]: https://github.com/tumour/awg-mesh/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/tumour/awg-mesh/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/tumour/awg-mesh/compare/v0.6.6...v0.7.0
 [0.6.6]: https://github.com/tumour/awg-mesh/compare/v0.6.5...v0.6.6
