@@ -26,6 +26,13 @@ jobs:
       - name: go test
         run: go test ./... -race
 
+      # Wire-совместимость текущей amneziawg-go со старой линейкой 0.2.x (смешанный mesh
+      # на время раскатки). Отдельный модуль; без -race — гонка внутри старой библиотеки,
+      # см. doc пакета test/interop.
+      - name: interop (old ↔ new amneziawg-go)
+        working-directory: test/interop
+        run: go test ./... -count=1
+
       # Известные CVE в зависимостях/stdlib — для крипто-VPN обязательно. govulncheck
       # режет по реально вызываемому коду, не по всему графу. Версия пиннута (не @latest).
       - name: govulncheck
