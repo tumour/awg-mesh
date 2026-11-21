@@ -87,3 +87,73 @@ func TestValidate_RejectsNegativeAndEmptyJunk(t *testing.T) {
 		})
 	}
 }
+
+// amneziawg-go v3 парсит s1-s4 как uint16: S > 65535 → IpcErrorInvalid → Configure
+// падает на КАЖДОЙ ноде (params общие). Validate обязан ловить это ДО анонса flag-day.
+func TestValidate_RejectsSAboveUint16(t *testing.T) {
+	for name, mut := range map[string]func(*Params){
+		"S1=65536": func(p *Params) { p.S1 = 65536 },
+		"S2=65536": func(p *Params) { p.S2 = 65536 },
+		"S3=65536": func(p *Params) { p.S3 = 65536 },
+		"S4=65536": func(p *Params) { p.S4 = 65536 },
+		"S4=1<<20": func(p *Params) { p.S4 = 1 << 20 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := validParams()
+			mut(&p)
+			if Validate(p) == nil {
+				t.Fatalf("%s должно отвергаться (device не примет S > 65535)", name)
+			}
+		})
+	}
+}
+
+// Граница включительная: 65535 — последнее значение, которое device принимает.
+// Off-by-one в сторону «строже» отрезал бы законный набор оператора.
+func TestValidate_AcceptsSAtUint16Max(t *testing.T) {
+	for name, mut := range map[string]func(*Params){
+		"S1=65535": func(p *Params) { p.S1 = 65535 },
+		"S2=65535": func(p *Params) { p.S2 = 65535 },
+		"S3=65535": func(p *Params) { p.S3 = 65535 },
+		"S4=65535": func(p *Params) { p.S4 = 65535 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := validParams()
+			mut(&p)
+			if err := Validate(p); err != nil {
+				t.Fatalf("%s должно приниматься: %v", name, err)
+			}
+		})
+	}
+}
+
+// Нулевые Jc/Jmin/Jmax: v3 их принимает («junk выключен»), но предыдущая линейка
+// amneziawg-go (0.2.x) отвергает jc/jmin/jmax <= 0. Пока в mesh могут жить ноды на
+// старой библиотеке, такой набор уронит у них ApplyParams/Configure → Validate строже
+// обеих версий: J >= 1.
+func TestValidate_RejectsZeroJunk(t *testing.T) {
+	for name, mut := range map[string]func(*Params){
+		"Jc=0":        func(p *Params) { p.Jc = 0 },
+		"Jmin=0":      func(p *Params) { p.Jmin = 0 },
+		"Jmin=Jmax=0": func(p *Params) { p.Jmin, p.Jmax = 0, 0 },
+		"all-zero":    func(p *Params) { p.Jc, p.Jmin, p.Jmax = 0, 0, 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := validParams()
+			mut(&p)
+			if Validate(p) == nil {
+				t.Fatalf("%s должно отвергаться (старая библиотека не примет)", name)
+			}
+		})
+	}
+}
+
+// Вырожденный, но законный junk: Jmin == Jmax (фиксированный размер) — принимается
+// обеими версиями; Validate не должен быть строже библиотеки без причины.
+func TestValidate_AcceptsJminEqualsJmax(t *testing.T) {
+	p := validParams()
+	p.Jmin, p.Jmax = 64, 64
+	if err := Validate(p); err != nil {
+		t.Fatalf("Jmin==Jmax должно приниматься: %v", err)
+	}
+}

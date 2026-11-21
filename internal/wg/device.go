@@ -101,6 +101,9 @@ func (d *Device) Configure(
 	peers []state.Peer,
 	selfPubKey wgkey.Public,
 ) error {
+	// Политику (awgparams.Validate) здесь НАМЕРЕННО не проверяем: это старт ноды, и state
+	// может нести легаси-набор вне политики (H из AWG-1.0 после миграции v1→v2), который
+	// библиотека принимает. Быть строже device на старте = апгрейд кладёт ноду.
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "private_key=%s\n", priv.Hex())
 	fmt.Fprintf(&sb, "listen_port=%d\n", d.listenPort)
@@ -199,9 +202,16 @@ func writeLocalObf(sb *strings.Builder, lo awgparams.LocalObf) {
 
 // ApplyParams применяет СЕТЕВЫЕ params к уже поднятому awg0 на лету (flag-day
 // flip) — через UAPI, без replace_peers и пересоздания интерфейса. Туннели
-// рехендшейкаются на новых S/H, но IP/маршруты/пиры сохраняются. Ошибка IpcSet
-// (кривые params) → caller оставляет прежний набор.
+// рехендшейкаются на новых S/H, но IP/маршруты/пиры сохраняются. Ошибка → device
+// остаётся на прежнем наборе: лимиты device проверяем ДО IpcSet, потому что
+// amneziawg-go отвергает часть наборов (jmin>jmax) уже ПОСЛЕ записи H/S —
+// полуприменённый набор = рассинхрон со всем mesh. Именно лимиты device, а не политика
+// Validate: набор разослал seed, и нода, отказавшаяся строже библиотеки, осталась бы
+// на старом наборе одна.
 func (d *Device) ApplyParams(p awgparams.Params) error {
+	if err := awgparams.CheckDeviceLimits(p); err != nil {
+		return fmt.Errorf("net-params: %w", err)
+	}
 	var sb strings.Builder
 	writeNetParams(&sb, p)
 	if err := d.dev.IpcSet(sb.String()); err != nil {
