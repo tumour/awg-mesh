@@ -9,8 +9,8 @@ import (
 
 // TestWriteAwgParams фиксирует UAPI-формат AWG-2.0: H1-H4 как "min-max",
 // S3/S4 шлются всегда (lib трактует 0 как «выключено»), а I1-I5 — только
-// непустые (per-node CPS-пакеты). Формат сверен с amneziawg-go v0.2.19
-// device/uapi.go (newMagicHeader "min-max", s3/s4 int, i* via newObfChain).
+// непустые (per-node CPS-пакеты). Формат сверен с amneziawg-go v3.1
+// device/uapi.go (H через UintRange "min-max", s1-s4 uint16, i* через newObfChain).
 func TestWriteAwgParams(t *testing.T) {
 	p := awgparams.Params{
 		Jc: 5, Jmin: 50, Jmax: 200, S1: 80, S2: 77, S3: 38, S4: 7,

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/tun/tuntest"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/tun/tuntest"
 )
 
 // ValidateObfSpec проверяет CPS-spec I-пакета (I1-I5) настоящим парсером amneziawg-go:

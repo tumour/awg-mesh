@@ -3,7 +3,7 @@ module github.com/tumour/awg-mesh
 go 1.27.4
 
 require (
-	github.com/amnezia-vpn/amneziawg-go v0.2.19
+	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20261116
 	github.com/flynn/noise v1.1.0
 	golang.org/x/crypto v0.59.0
 )
