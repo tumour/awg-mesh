@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	awgdev "github.com/amnezia-vpn/amneziawg-go/device"
+	awgdev "github.com/amnezia-vpn/amneziawg-go/v3/device"
 
 	"github.com/tumour/awg-mesh/internal/api"
 	"github.com/tumour/awg-mesh/internal/awgparams"
