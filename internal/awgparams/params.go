@@ -136,7 +136,13 @@ const (
 	// ([5, 2^31-1]): amneziawg-go под Windows исторически ломался на значениях
 	// со старшим битом, и гайды 2026 рекомендуют генерить в safe-half.
 	safeHeaderMax = 1<<31 - 1
+
+	// maxPadding — потолок S1-S4: amneziawg-go парсит padding'и как uint16.
+	maxPadding = 1<<16 - 1
 )
+
+// validPadding — S-значение, которое device примет: [0, maxPadding].
+func validPadding(s int) bool { return s >= 0 && s <= maxPadding }
 
 // Generate возвращает СЕТЕВЫЕ Params со случайными AWG-2.0-значениями из
 // рекомендованных диапазонов. Зовётся один раз на `meshd init`, затем раздаётся.
@@ -215,20 +221,23 @@ func Generate() (Params, error) {
 // аргументами set-params, обязан пройти Validate ДО анонса flag-day.
 //
 // Проверяется:
-//   - неотрицательность S1-S4 и junk-полей, Jmax >= Jmin (иначе диапазон junk пуст);
+//   - S1-S4 в [0, maxPadding]: device парсит их как uint16, больше → IpcSet отвергнут;
+//   - Jc/Jmin/Jmax >= 1 и Jmax >= Jmin (иначе диапазон junk пуст). Ноль новая
+//     библиотека трактует как «junk выключен», но линейка 0.2.x его отвергает —
+//     набор обязан подниматься на нодах обеих версий (смешанный mesh на раскатке);
 //   - padded init и response различаются по размеру (wgInitMsgSize+S1 !=
 //     wgResponseMsgSize+S2) — иначе amneziawg не различит их длины;
 //   - H1-H4 валидны (Min in [5, safeHeaderMax], Min<=Max) и попарно не пересекаются.
 //
-// Верхнюю границу S намеренно не навязываем: огромный S4 раздувает per-packet padding
-// и сжимает MTU (см. wg.TunMTU) — это операционный footgun, не крах Configure; значения
-// оператор берёт из рекомендованных диапазонов (см. Generate).
+// Сверх жёсткого потолка uint16 S не ограничиваем: огромный S4 раздувает per-packet
+// padding и сжимает MTU (см. wg.TunMTU) — это операционный footgun, не крах Configure;
+// значения оператор берёт из рекомендованных диапазонов (см. Generate).
 func Validate(p Params) error {
-	if p.S1 < 0 || p.S2 < 0 || p.S3 < 0 || p.S4 < 0 {
-		return fmt.Errorf("S1-S4 не могут быть отрицательными: S1=%d S2=%d S3=%d S4=%d", p.S1, p.S2, p.S3, p.S4)
+	if !validPadding(p.S1) || !validPadding(p.S2) || !validPadding(p.S3) || !validPadding(p.S4) {
+		return fmt.Errorf("S1-S4 должны быть в [0, %d]: S1=%d S2=%d S3=%d S4=%d", maxPadding, p.S1, p.S2, p.S3, p.S4)
 	}
-	if p.Jc < 0 || p.Jmin < 0 || p.Jmax < 0 {
-		return fmt.Errorf("Jc/Jmin/Jmax не могут быть отрицательными: Jc=%d Jmin=%d Jmax=%d", p.Jc, p.Jmin, p.Jmax)
+	if p.Jc < 1 || p.Jmin < 1 || p.Jmax < 1 {
+		return fmt.Errorf("Jc/Jmin/Jmax должны быть >= 1: Jc=%d Jmin=%d Jmax=%d", p.Jc, p.Jmin, p.Jmax)
 	}
 	if p.Jmax < p.Jmin {
 		return fmt.Errorf("Jmax (%d) < Jmin (%d): диапазон junk-пакетов пуст", p.Jmax, p.Jmin)
@@ -241,6 +250,46 @@ func Validate(p Params) error {
 	}
 	return nil
 }
+
+// maxJunk — потолок Jc/Jmin/Jmax: device парсит их как uint32.
+const maxJunk = 1<<32 - 1
+
+// CheckDeviceLimits — РОВНО те правила, по которым amneziawg-go отвергает сетевые params
+// на IpcSet: S1-S4 в [0, 65535], Jc/Jmin/Jmax в [0, 2^32-1] и Jmin <= Jmax, каждый
+// H-диапазон Min <= Max, H1-H4 попарно не пересекаются.
+//
+// Это НЕ политика (политика — Validate, она строже и применяется к вводу оператора).
+// Зачем отдельно: device применяет набор не атомарно (H/S пишутся до отказа на jmin>jmax),
+// поэтому перед живым ApplyParams нужна проверка, которая отсеет всё, что device
+// отвергнет, — и при этом не отсеет ничего, что он примет (легаси-state, набор от seed'а
+// другой версии). Совпадение с библиотекой в обе стороны держит fuzz-тест в internal/wg.
+func CheckDeviceLimits(p Params) error {
+	if !validPadding(p.S1) || !validPadding(p.S2) || !validPadding(p.S3) || !validPadding(p.S4) {
+		return fmt.Errorf("S1-S4 должны быть в [0, %d]: S1=%d S2=%d S3=%d S4=%d", maxPadding, p.S1, p.S2, p.S3, p.S4)
+	}
+	if !validJunk(p.Jc) || !validJunk(p.Jmin) || !validJunk(p.Jmax) {
+		return fmt.Errorf("Jc/Jmin/Jmax должны быть в [0, %d]: Jc=%d Jmin=%d Jmax=%d", uint64(maxJunk), p.Jc, p.Jmin, p.Jmax)
+	}
+	if p.Jmin > p.Jmax {
+		return fmt.Errorf("Jmin (%d) > Jmax (%d)", p.Jmin, p.Jmax)
+	}
+	hs := [4]HeaderRange{p.H1, p.H2, p.H3, p.H4}
+	for i, h := range hs {
+		if h.Min > h.Max {
+			return fmt.Errorf("H%d: Min %d > Max %d", i+1, h.Min, h.Max)
+		}
+		for j := 0; j < i; j++ {
+			if h.Min <= hs[j].Max && hs[j].Min <= h.Max {
+				return fmt.Errorf("H%d %v пересекается с H%d %v", i+1, h, j+1, hs[j])
+			}
+		}
+	}
+	return nil
+}
+
+// validJunk — J-значение, которое device распарсит (uint32). int64 — чтобы сравнение
+// с 2^32-1 компилировалось и на 32-битных арках (armv7/mips), где int 32-битный.
+func validJunk(j int) bool { return j >= 0 && int64(j) <= maxJunk }
 
 // randHeaderRange — случайный H-диапазон [Min, Min+width] в safe-half, Min>4.
 func randHeaderRange() (HeaderRange, error) {
