@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,13 +33,19 @@ import (
 	newtuntest "github.com/amnezia-vpn/amneziawg-go/v3/tun/tuntest"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/awgparams/awgtest"
+	"github.com/tumour/awg-mesh/internal/state"
+	"github.com/tumour/awg-mesh/internal/wg"
 	"github.com/tumour/awg-mesh/internal/wgkey"
 )
 
-const (
-	upWithin   = 10 * time.Second
-	downWithin = 1500 * time.Millisecond
-)
+// antiReplayWindow — пауза между переинициациями handshake'а с одним пиром: больше
+// гранулярности метки TAI64N (2^24 нс), иначе получатель отбросит initiation как повтор.
+const antiReplayWindow = 50 * time.Millisecond
+
+// upWithin — сколько ждём, что трафик ДОЛЖЕН пройти. Отрицательные проверки — не
+// таймаутом, а счётчиком реально полученных датаграмм (notDelivered).
+const upWithin = 10 * time.Second
 
 // dev — то общее, что нужно тесту от device любой версии.
 type dev interface {
@@ -55,6 +62,7 @@ type node struct {
 	d        dev
 	outbound chan<- []byte
 	rx       chan []byte
+	wire     *atomic.Int64 // UDP-датаграммы, реально полученные сокетом
 }
 
 func newNode(t *testing.T, lib, name, ip string) *node {
@@ -63,16 +71,16 @@ func newNode(t *testing.T, lib, name, ip string) *node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &node{name: name, lib: lib, ip: netip.MustParseAddr(ip), priv: priv, rx: make(chan []byte, 4096)}
+	n := &node{name: name, lib: lib, ip: netip.MustParseAddr(ip), priv: priv, rx: make(chan []byte, 4096), wire: new(atomic.Int64)}
 	var inbound <-chan []byte
 	switch lib {
 	case "old":
 		ct := oldtuntest.NewChannelTUN()
-		n.d = olddevice.NewDevice(ct.TUN(), oldconn.NewDefaultBind(), olddevice.NewLogger(olddevice.LogLevelSilent, ""))
+		n.d = olddevice.NewDevice(ct.TUN(), oldCountingBind{Bind: oldconn.NewDefaultBind(), rx: n.wire}, olddevice.NewLogger(olddevice.LogLevelSilent, ""))
 		n.outbound, inbound = ct.Outbound, ct.Inbound
 	case "new":
 		ct := newtuntest.NewChannelTUN()
-		n.d = newdevice.NewDevice(ct.TUN(), newconn.NewDefaultBind(), newdevice.NewLogger(newdevice.LogLevelSilent, ""))
+		n.d = newdevice.NewDevice(ct.TUN(), newCountingBind{Bind: newconn.NewDefaultBind(), rx: n.wire}, newdevice.NewLogger(newdevice.LogLevelSilent, ""))
 		n.outbound, inbound = ct.Outbound, ct.Inbound
 	default:
 		t.Fatalf("lib %q", lib)
@@ -98,39 +106,20 @@ func newNode(t *testing.T, lib, name, ip string) *node {
 	return n
 }
 
-// netUAPI — сетевые params в том же UAPI-формате, что шлёт meshd (internal/wg).
-func netUAPI(p awgparams.Params) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "jc=%d\njmin=%d\njmax=%d\n", p.Jc, p.Jmin, p.Jmax)
-	fmt.Fprintf(&sb, "s1=%d\ns2=%d\ns3=%d\ns4=%d\n", p.S1, p.S2, p.S3, p.S4)
-	for i, h := range []awgparams.HeaderRange{p.H1, p.H2, p.H3, p.H4} {
-		fmt.Fprintf(&sb, "h%d=%d-%d\n", i+1, h.Min, h.Max)
-	}
-	return sb.String()
-}
-
-func obfUAPI(lo awgparams.LocalObf) string {
-	var sb strings.Builder
-	for i, spec := range [5]string{lo.I1, lo.I2, lo.I3, lo.I4, lo.I5} {
-		if spec != "" {
-			fmt.Fprintf(&sb, "i%d=%s\n", i+1, spec)
-		}
-	}
-	return sb.String()
-}
-
-// peerUAPI — peer-блок как у meshd: allowed_ip /32, endpoint+keepalive только у публичных.
-func peerUAPI(peer *node, endpoint string) string {
-	s := fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", peer.priv.Public().Hex(), peer.ip)
-	if endpoint != "" {
-		s += fmt.Sprintf("endpoint=%s\npersistent_keepalive_interval=25\n", endpoint)
+// peerUAPI — peer-блок ПРОДУКТОВЫМ сериализатором meshd (internal/wg), не копией:
+// interop обязан проверять ровно тот формат, который meshd шлёт в device.
+func peerUAPI(t *testing.T, peer *node, endpoint string) string {
+	t.Helper()
+	s, err := wg.PeerUAPI(state.Peer{Label: peer.name, PublicKey: peer.priv.Public().String(), NodeIP: peer.ip.String(), Endpoint: endpoint})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return s
 }
 
 func (n *node) configure(t *testing.T, p awgparams.Params, lo awgparams.LocalObf, peers string) {
 	t.Helper()
-	cfg := fmt.Sprintf("private_key=%s\nlisten_port=0\n", n.priv.Hex()) + netUAPI(p) + obfUAPI(lo) +
+	cfg := fmt.Sprintf("private_key=%s\nlisten_port=0\n", n.priv.Hex()) + wg.NetParamsUAPI(p) + wg.LocalObfUAPI(lo) +
 		"replace_peers=true\n" + peers
 	if err := n.d.IpcSet(cfg); err != nil {
 		t.Fatalf("%s(%s): configure: %v", n.name, n.lib, err)
@@ -163,16 +152,14 @@ func pair(t *testing.T, natLib, pubLib string, p awgparams.Params, natObf, pubOb
 	t.Helper()
 	nat = newNode(t, natLib, "nat", "100.64.0.10")
 	pub = newNode(t, pubLib, "pub", "100.64.0.11")
-	pub.configure(t, p, pubObf, peerUAPI(nat, ""))
-	nat.configure(t, p, natObf, peerUAPI(pub, fmt.Sprintf("127.0.0.1:%d", pub.port(t))))
+	pub.configure(t, p, pubObf, peerUAPI(t, nat, ""))
+	nat.configure(t, p, natObf, peerUAPI(t, pub, fmt.Sprintf("127.0.0.1:%d", pub.port(t))))
 	return nat, pub
 }
 
 func reachable(t *testing.T, from, to *node, within time.Duration) bool {
 	t.Helper()
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	token := hex.EncodeToString(b[:])
+	token := randHex(t)
 	deadline := time.Now().Add(within)
 	for i := 0; time.Now().Before(deadline); i++ {
 		select {
@@ -180,20 +167,166 @@ func reachable(t *testing.T, from, to *node, within time.Duration) bool {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s(%s): TUN не принимает пакеты", from.name, from.lib)
 		}
-		wait := time.After(150 * time.Millisecond)
-	recv:
-		for {
-			select {
-			case pkt := <-to.rx:
-				if len(pkt) > 28 && strings.HasPrefix(string(pkt[28:]), token) {
-					return true
-				}
-			case <-wait:
-				break recv
-			}
+		if waitToken(to, token, 150*time.Millisecond) {
+			return true
 		}
 	}
 	return false
+}
+
+// Счётчики датаграмм для обеих библиотек: у них разные типы conn.Bind/ReceiveFunc.
+type oldCountingBind struct {
+	oldconn.Bind
+	rx *atomic.Int64
+}
+
+func (b oldCountingBind) Open(port uint16) ([]oldconn.ReceiveFunc, uint16, error) {
+	fns, actual, err := b.Bind.Open(port)
+	out := make([]oldconn.ReceiveFunc, len(fns))
+	for i, fn := range fns {
+		out[i] = func(p [][]byte, sz []int, eps []oldconn.Endpoint) (int, error) {
+			n, err := fn(p, sz, eps)
+			b.rx.Add(int64(n))
+			return n, err
+		}
+	}
+	return out, actual, err
+}
+
+type newCountingBind struct {
+	newconn.Bind
+	rx *atomic.Int64
+}
+
+func (b newCountingBind) Open(port uint16) ([]newconn.ReceiveFunc, uint16, error) {
+	fns, actual, err := b.Bind.Open(port)
+	out := make([]newconn.ReceiveFunc, len(fns))
+	for i, fn := range fns {
+		out[i] = func(p [][]byte, sz []int, eps []newconn.Endpoint) (int, error) {
+			n, err := fn(p, sz, eps)
+			b.rx.Add(int64(n))
+			return n, err
+		}
+	}
+	return out, actual, err
+}
+
+// notDelivered — трафик from→to НЕ проходит: до сокета получателя дошло не меньше
+// minDropped датаграмм, и ни одна не попала в его TUN. Датаграммы не доходят вовсе →
+// падение: отказ device не доказан.
+func notDelivered(t *testing.T, from, to *node) {
+	t.Helper()
+	const minDropped = 6
+	token := randHex(t)
+	start := to.wire.Load()
+	deadline := time.Now().Add(upWithin)
+	for i := 0; to.wire.Load()-start < minDropped; i++ {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s→%s: до сокета дошло %d датаграмм — отказ device не доказан", from.lib, to.lib, to.wire.Load()-start)
+		}
+		select {
+		case from.outbound <- udpPacket(from.ip, to.ip, fmt.Sprintf("%s#%d", token, i)):
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: TUN не принимает пакеты", from.lib)
+		}
+		if waitToken(to, token, 100*time.Millisecond) {
+			t.Fatalf("%s→%s: пакет доставлен, хотя должен быть отброшен", from.lib, to.lib)
+		}
+	}
+	if waitToken(to, token, 200*time.Millisecond) {
+		t.Fatalf("%s→%s: пакет доставлен, хотя должен быть отброшен", from.lib, to.lib)
+	}
+}
+
+func waitToken(n *node, token string, d time.Duration) bool {
+	timeout := time.After(d)
+	for {
+		select {
+		case pkt := <-n.rx:
+			if len(pkt) > 28 && strings.HasPrefix(string(pkt[28:]), token) {
+				return true
+			}
+		case <-timeout:
+			return false
+		}
+	}
+}
+
+func randHex(t *testing.T) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Горячая смена I1 во время handshake'ей — на обеих версиях. Под -race на 0.2.x это
+// ОБЯЗАНО падать (неатомарная запись I-пакетов против чтения в SendHandshakeInitiation):
+// так доказано, что сценарий ловит гонку. На v3 — чисто. В CI модуль гоняется без -race
+// (гонка старой библиотеки срабатывает уже на Configure), здесь проверяется wire;
+// v3-вариант под -race гоняет internal/wg (TestTunnel_I1HotSwapDuringHandshakes).
+func TestInterop_I1HotSwapDuringHandshakes(t *testing.T) {
+	quic, err := awgparams.GenerateQUICInitialObf("example.org", rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := []awgparams.LocalObf{awgparams.DefaultLocalObf(), {I1: quic}, {I1: "<b 0xc0ffee><r 40>"}}
+	for _, lib := range []string{"old", "new"} {
+		t.Run(lib, func(t *testing.T) {
+			nat, pub := pair(t, lib, "new", generate(t), specs[0], awgparams.LocalObf{})
+			if !reachable(t, nat, pub, upWithin) {
+				t.Fatal("туннель не поднялся")
+			}
+			stop, done := make(chan struct{}), make(chan struct{})
+			var swaps atomic.Int64
+			go func() {
+				defer close(done)
+				for i := 0; ; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if err := nat.d.IpcSet(wg.LocalObfUAPI(specs[i%len(specs)])); err != nil {
+						t.Errorf("i1 swap: %v", err)
+						return
+					}
+					swaps.Add(1)
+				}
+			}()
+			// Без keepalive: иначе immediate keepalive запускает initiation ВНУТРИ IpcSet —
+			// под тем же мьютексом, что и смена I1, и гонке негде случиться. Initiation
+			// должна идти из data-path (пакет из TUN), как в эксплуатации.
+			peerCfg := withoutKeepalive(peerUAPI(t, pub, fmt.Sprintf("127.0.0.1:%d", pub.port(t))))
+			for i := 0; i < 10; i++ {
+				// Anti-replay WireGuard: метка TAI64N в initiation округляется до 2^24 нс
+				// (≈16.8 мс), получатель берёт только строго бо́льшую. Переинициация в том
+				// же окне отбрасывается как повтор → ретрай через REKEY_TIMEOUT (5 с).
+				time.Sleep(antiReplayWindow)
+				before := swaps.Load()
+				if err := nat.d.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", pub.priv.Public().Hex())); err != nil {
+					t.Fatal(err)
+				}
+				if err := nat.d.IpcSet(peerCfg); err != nil {
+					t.Fatal(err)
+				}
+				if !reachable(t, nat, pub, upWithin) {
+					t.Fatalf("handshake #%d не прошёл во время смены I1", i)
+				}
+				if swaps.Load() == before {
+					t.Fatalf("handshake #%d без единой смены I1 — гонка не проверена", i)
+				}
+			}
+			close(stop)
+			<-done
+		})
+	}
+}
+
+// withoutKeepalive убирает keepalive из продуктового peer-блока (см. hot-swap-тесты).
+func withoutKeepalive(block string) string {
+	return strings.Replace(block, "persistent_keepalive_interval=25\n", "", 1)
 }
 
 func udpPacket(src, dst netip.Addr, payload string) []byte {
@@ -290,13 +423,11 @@ func TestInterop_FlagDayFlipMixed(t *testing.T) {
 			if first == "new" {
 				a, b = pub, nat
 			}
-			if err := a.d.IpcSet(netUAPI(p2)); err != nil {
+			if err := a.d.IpcSet(wg.NetParamsUAPI(p2)); err != nil {
 				t.Fatalf("%s: flip: %v", a.lib, err)
 			}
-			if reachable(t, nat, pub, downWithin) {
-				t.Fatal("flip только одной стороны не порвал трафик — набор не применился")
-			}
-			if err := b.d.IpcSet(netUAPI(p2)); err != nil {
+			notDelivered(t, nat, pub) // flip одной стороны → датаграммы доходят и отбрасываются
+			if err := b.d.IpcSet(wg.NetParamsUAPI(p2)); err != nil {
 				t.Fatalf("%s: flip: %v", b.lib, err)
 			}
 			if !reachable(t, nat, pub, upWithin) || !reachable(t, pub, nat, upWithin) {
@@ -310,13 +441,7 @@ func TestInterop_FlagDayFlipMixed(t *testing.T) {
 // миграции v1→v2) обязан держать туннель между версиями: такие mesh'и существуют и
 // будут обновляться на новую библиотеку.
 func TestInterop_LegacyHeadersMixed(t *testing.T) {
-	legacy := awgparams.Params{
-		Jc: 3, Jmin: 50, Jmax: 1000, S1: 60, S2: 4,
-		H1: awgparams.HeaderRange{Min: 3_908_512_031, Max: 3_908_512_031},
-		H2: awgparams.HeaderRange{Min: 2_147_483_648, Max: 2_147_483_648},
-		H3: awgparams.HeaderRange{Min: 77_123_456, Max: 77_123_456},
-		H4: awgparams.HeaderRange{Min: 4_294_967_295, Max: 4_294_967_295},
-	}
+	legacy := awgtest.Legacy()
 	for _, c := range [][2]string{{"old", "new"}, {"new", "old"}} {
 		t.Run(c[0]+"-nat", func(t *testing.T) {
 			nat, pub := pair(t, c[0], c[1], legacy, awgparams.DefaultLocalObf(), awgparams.LocalObf{})
@@ -344,7 +469,7 @@ func FuzzValidateImpliesOldLibAccepts(f *testing.F) {
 		ct := oldtuntest.NewChannelTUN()
 		d := olddevice.NewDevice(ct.TUN(), oldconn.NewDefaultBind(), olddevice.NewLogger(olddevice.LogLevelSilent, ""))
 		defer d.Close()
-		if err := d.IpcSet(netUAPI(p)); err != nil {
+		if err := d.IpcSet(wg.NetParamsUAPI(p)); err != nil {
 			t.Fatalf("Validate пропустил набор, который старая библиотека отвергает: %v (%+v)", err, p)
 		}
 	})

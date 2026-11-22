@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/awgparams/awgtest"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -24,7 +24,7 @@ func storeWithPending(t *testing.T, pending *state.PendingParams) *state.Store {
 	s := &state.State{
 		NodeLabel:     "n",
 		ParamsVersion: 1,
-		AwgParams:     awgparams.Params{S4: 0}, // «старый» набор
+		AwgParams:     awgtest.Valid(0), // «старый» набор
 		Pending:       pending,
 	}
 	if err := s.Save(path); err != nil {
@@ -44,7 +44,7 @@ func flipperFor(store *state.Store, dev Device, abortMargin, maxStale time.Durat
 }
 
 func TestApplyIfDue(t *testing.T) {
-	newParams := awgparams.Params{S4: 16, Jc: 5} // «новый» набор, отличим от старого
+	newParams := awgtest.Valid(17) // «новый» набор, отличим от старого
 	now := time.Now().UTC()
 
 	t.Run("due и держим коммит давно — применяется и в state, и в device", func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestApplyIfDue(t *testing.T) {
 // флипает, только если держит его не меньше abortMargin. Коммит, увиденный впритык к
 // ApplyAt, НЕ применяется — возможен abort в полёте (ровно сценарий, изолировавший ноду).
 func TestParamFlipper_GuardOnLateCommit(t *testing.T) {
-	newParams := awgparams.Params{S4: 16}
+	newParams := awgtest.Valid(16)
 	t0 := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	applyAt := t0.Add(4 * time.Minute)
 
@@ -105,7 +105,7 @@ func TestParamFlipper_GuardOnLateCommit(t *testing.T) {
 		dev := &fakeDevice{}
 		f := flipperFor(store, dev, time.Minute, 10*time.Minute, 0, time.Time{})
 
-		f.tick(t0)                       // впервые видим committed v2 в t0 (за 4мин до ApplyAt)
+		f.tick(t0) // впервые видим committed v2 в t0 (за 4мин до ApplyAt)
 		if dev.appliedParams {
 			t.Fatal("не должен флипать до ApplyAt")
 		}
@@ -134,16 +134,16 @@ func TestParamFlipper_ObserveResetsOnAnnounce(t *testing.T) {
 	t0 := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	f := &paramFlipper{abortMargin: time.Minute, maxStale: time.Hour, log: quietLogger()}
 
-	f.observe(&state.PendingParams{Version: 2, ApplyAt: t0}, t0) // committed v2
+	f.observe(&state.PendingParams{Params: awgtest.Valid(16), Version: 2, ApplyAt: t0}, t0) // committed v2
 	if f.seenVer != 2 || !f.seenAt.Equal(t0) {
 		t.Fatalf("после committed: seenVer=%d seenAt=%v", f.seenVer, f.seenAt)
 	}
-	f.observe(&state.PendingParams{Version: 3}, t0.Add(time.Minute)) // abort → announced v3
+	f.observe(&state.PendingParams{Params: awgtest.Valid(16), Version: 3}, t0.Add(time.Minute)) // abort → announced v3
 	if f.seenVer != 0 {
 		t.Fatalf("анонс должен сбросить seenVer, got %d", f.seenVer)
 	}
 	later := t0.Add(2 * time.Minute)
-	f.observe(&state.PendingParams{Version: 3, ApplyAt: later}, later) // committed v3
+	f.observe(&state.PendingParams{Params: awgtest.Valid(16), Version: 3, ApplyAt: later}, later) // committed v3
 	if f.seenVer != 3 || !f.seenAt.Equal(later) {
 		t.Fatalf("committed v3 должен переснять seenAt: seenVer=%d seenAt=%v", f.seenVer, f.seenAt)
 	}
@@ -168,7 +168,9 @@ func seedStore(t *testing.T, pending *state.PendingParams) *state.Store {
 	return state.NewStore(path)
 }
 
-func announced() *state.PendingParams { return &state.PendingParams{Version: 2} } // ApplyAt нулевой
+func announced() *state.PendingParams {
+	return &state.PendingParams{Params: awgtest.Valid(16), Version: 2}
+} // ApplyAt нулевой
 
 func TestCommitIfAllAcked(t *testing.T) {
 	t.Run("все подтвердили — ApplyAt назначен", func(t *testing.T) {
@@ -190,7 +192,7 @@ func TestCommitIfAllAcked(t *testing.T) {
 	})
 
 	t.Run("уже закоммичен — no-op", func(t *testing.T) {
-		committed := &state.PendingParams{Version: 2, ApplyAt: time.Now().Add(time.Minute).UTC()}
+		committed := &state.PendingParams{Params: awgtest.Valid(16), Version: 2, ApplyAt: time.Now().Add(time.Minute).UTC()}
 		store := seedStore(t, committed)
 		commitIfAllAcked(store, map[string]uint64{"A": 2, "B": 2}, "SELF", 30*time.Second, quietLogger())
 		s, _ := store.Read()
@@ -211,7 +213,7 @@ func TestCommitIfAllAcked(t *testing.T) {
 
 // committedAt — Pending версии v, закоммиченный на applyAt.
 func committedAt(v uint64, applyAt time.Time) *state.PendingParams {
-	return &state.PendingParams{Params: awgparams.Params{S4: 16}, Version: v, ApplyAt: applyAt}
+	return &state.PendingParams{Params: awgtest.Valid(16), Version: v, ApplyAt: applyAt}
 }
 
 // abortIfStuck отменяет flip (переанонс v+1, ApplyAt=0), если к дедлайну не все
@@ -221,8 +223,8 @@ func TestAbortIfStuck(t *testing.T) {
 	const margin = time.Minute
 
 	t.Run("не все commit-acked + дедлайн настал → abort (переанонс v+1)", func(t *testing.T) {
-		store := seedStore(t, committedAt(2, now.Add(30*time.Second))) // ApplyAt-margin = now-30с ≤ now
-		abortIfStuck(store, map[string]uint64{"A": 2}, "SELF", margin, now, quietLogger())          // B молчит
+		store := seedStore(t, committedAt(2, now.Add(30*time.Second)))                     // ApplyAt-margin = now-30с ≤ now
+		abortIfStuck(store, map[string]uint64{"A": 2}, "SELF", margin, now, quietLogger()) // B молчит
 		s, _ := store.Read()
 		if s.Pending == nil || s.Pending.Version != 3 || !s.Pending.ApplyAt.IsZero() {
 			t.Fatalf("должен переанонсить v3 announced: %+v", s.Pending)
@@ -288,7 +290,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestApplyIfDueDeviceError(t *testing.T) {
 	now := time.Now().UTC()
 	applyAt := now.Add(-time.Minute)
-	store := storeWithPending(t, &state.PendingParams{Version: 2, ApplyAt: applyAt})
+	store := storeWithPending(t, &state.PendingParams{Params: awgtest.Valid(16), Version: 2, ApplyAt: applyAt})
 	dev := &fakeDevice{applyParamsErr: errors.New("ipcset boom")}
 	f := flipperFor(store, dev, time.Minute, time.Hour, 2, applyAt.Add(-time.Hour))
 
@@ -303,7 +305,7 @@ func TestApplyIfDueDeviceError(t *testing.T) {
 // runParamFlip (ticker) применяет due-Pending (с пройденным гардом held) и завершается по ctx.
 func TestRunParamFlip(t *testing.T) {
 	applyAt := time.Now().Add(-time.Second).UTC()
-	store := storeWithPending(t, &state.PendingParams{Version: 2, ApplyAt: applyAt})
+	store := storeWithPending(t, &state.PendingParams{Params: awgtest.Valid(16), Version: 2, ApplyAt: applyAt})
 	// наблюдали коммит задолго до ApplyAt → гард пройден
 	f := flipperFor(store, &fakeDevice{}, 10*time.Millisecond, time.Hour, 2, applyAt.Add(-time.Hour))
 	startLoop(t, func(ctx context.Context) { runParamFlip(ctx, f, 5*time.Millisecond) })
@@ -339,7 +341,7 @@ func TestCommitGraceAndAbortMargin(t *testing.T) {
 func TestApplyIfDueRejectsStalePending(t *testing.T) {
 	now := time.Now().UTC()
 	applyAt := now.Add(-time.Hour) // ApplyAt час назад — протух
-	store := storeWithPending(t, &state.PendingParams{Params: awgparams.Params{S4: 16}, Version: 2, ApplyAt: applyAt})
+	store := storeWithPending(t, &state.PendingParams{Params: awgtest.Valid(16), Version: 2, ApplyAt: applyAt})
 	dev := &fakeDevice{}
 	// держим коммит давно (гард held пройден), но maxStale=1мин ≪ 1час
 	f := flipperFor(store, dev, time.Second, time.Minute, 2, applyAt.Add(-time.Hour))

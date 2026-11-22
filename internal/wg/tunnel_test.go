@@ -5,16 +5,16 @@ import (
 	"crypto/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
 )
 
-const (
-	upWithin   = 10 * time.Second        // сколько ждём, что туннель ДОЛЖЕН пропустить трафик
-	downWithin = 1500 * time.Millisecond // сколько ждём, убеждаясь, что трафик НЕ проходит
-)
+// upWithin — сколько ждём, что туннель ДОЛЖЕН пропустить трафик. Отрицательные проверки
+// таймаутом не делаются: см. notDelivered (счётчик датаграмм) и состояние UAPI.
+const upWithin = 10 * time.Second
 
 // Базовый контракт data plane: NAT-нода инициирует, трафик идёт в обе стороны, на
 // реальных сгенерированных params (S1-S4 + H-диапазоны) и боевом дефолтном I1.
@@ -49,8 +49,18 @@ func TestTunnel_PublicReachesNATOnlyAfterNATLearnsEndpoint(t *testing.T) {
 	pub.configureUp(t, p, awgparams.LocalObf{}, nat.asPeer(t, false))
 	nat.configureUp(t, p, awgparams.LocalObf{}, pub.asPeer(t, false)) // endpoint публичной ещё не известен
 
-	if reachable(t, pub, nat, downWithin) {
-		t.Fatal("pub достучался до nat, хотя у nat-пира нет endpoint'а и nat не инициировал")
+	// Доказательство состоянием, а не таймаутом: у pub нет адреса, куда слать nat'у, а
+	// nat не знает, куда стучаться к pub. Трафик pub→nat физически некуда отправить.
+	if ep, ok := peerEndpoint(t, pub, nat); ok {
+		t.Fatalf("у pub появился endpoint nat'а (%s), хотя nat не инициировал", ep)
+	}
+	if ep, ok := peerEndpoint(t, nat, pub); ok {
+		t.Fatalf("у nat есть endpoint pub (%s) до UpdatePeer", ep)
+	}
+	nat.send(pub, "probe")
+	pub.send(nat, "probe")
+	if ep, ok := peerEndpoint(t, pub, nat); ok {
+		t.Fatalf("после попытки отправки у pub появился endpoint nat'а (%s)", ep)
 	}
 
 	if err := nat.dev.UpdatePeer(pub.asPeer(t, true)); err != nil {
@@ -114,9 +124,7 @@ func TestTunnel_NetParamMismatchBreaksTraffic(t *testing.T) {
 			pub := newTNode(t, "pub", "100.64.0.11")
 			pub.configureUp(t, p, awgparams.LocalObf{}, nat.asPeer(t, false))
 			nat.configureUp(t, other, awgparams.LocalObf{}, pub.asPeer(t, true))
-			if reachable(t, nat, pub, 2*downWithin) {
-				t.Fatalf("трафик идёт при расхождении %s — параметр не применяется к wire", name)
-			}
+			notDelivered(t, nat, pub) // датаграммы доходят до сокета и отбрасываются
 		})
 	}
 }
@@ -160,9 +168,7 @@ func TestTunnel_FlagDayFlipLive(t *testing.T) {
 			if err := nat.dev.ApplyParams(p2); err != nil {
 				t.Fatalf("ApplyParams nat: %v", err)
 			}
-			if reachable(t, nat, pub, downWithin) {
-				t.Fatal("после flip'а ТОЛЬКО одной стороны трафик nat→pub идёт — новый набор не применился")
-			}
+			notDelivered(t, nat, pub) // flip только одной стороны → рассинхрон → отброс
 
 			if err := pub.dev.ApplyParams(p2); err != nil {
 				t.Fatalf("ApplyParams pub: %v", err)
@@ -241,10 +247,12 @@ func TestTunnel_ParamFlipStormUnderLoad(t *testing.T) {
 	}
 }
 
-// Гонка «смена I1 во время отправки handshake» (чинилась в upstream v3.1): одна горутина
-// крутит ApplyObf, другая заставляет device снова и снова инициировать handshake (снять
-// и вернуть пира → первый же пакет триггерит initiation, которая читает I1-I5). Под -race
-// любая несинхронизированная запись I-пакетов — падение.
+// Гонка «смена I1 во время отправки handshake» (чинилась в upstream v3.1; в 0.2.x —
+// неатомарная запись I-пакетов, см. test/interop): свапер крутит ApplyObf ВСЁ время,
+// пока основной цикл раз за разом заставляет device пройти ПОЛНЫЙ handshake (снять и
+// вернуть пира → первый пакет триггерит initiation, которая читает I1-I5). Каждая
+// итерация ждёт завершённого handshake'а — иначе тест мог бы «пройти», не отправив ни
+// одной initiation во время смены. Под -race несинхронизированная запись — падение.
 func TestTunnel_I1HotSwapDuringHandshakes(t *testing.T) {
 	quic, err := awgparams.GenerateQUICInitialObf("example.org", rand.Reader)
 	if err != nil {
@@ -261,31 +269,78 @@ func TestTunnel_I1HotSwapDuringHandshakes(t *testing.T) {
 		t.Fatal("туннель не поднялся")
 	}
 	pubPeer := pub.asPeer(t, true)
+	pubBlock, err := PeerUAPI(pubPeer)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	done := make(chan struct{})
+	stop := make(chan struct{})
+	var swaps atomic.Int64
+	swapperDone := make(chan struct{})
 	go func() {
-		defer close(done)
-		for i := 0; i < 300; i++ {
+		defer close(swapperDone)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			if err := nat.dev.ApplyObf(specs[i%len(specs)]); err != nil {
 				t.Errorf("ApplyObf #%d: %v", i, err)
 				return
 			}
+			swaps.Add(1)
 		}
 	}()
-	for i := 0; i < 30; i++ {
+
+	const handshakes = 20
+	for i := 0; i < handshakes; i++ {
+		time.Sleep(antiReplayWindow) // иначе initiation отбросят как повтор (см. константу)
+		before := swaps.Load()
 		if err := nat.dev.RemovePeer(pubPeer.PublicKey); err != nil {
 			t.Fatalf("RemovePeer: %v", err)
 		}
-		if err := nat.dev.UpdatePeer(pubPeer); err != nil {
-			t.Fatalf("UpdatePeer: %v", err)
+		// Без keepalive: immediate keepalive запустил бы initiation ВНУТРИ IpcSet — под тем
+		// же мьютексом, что и ApplyObf, и гонке негде случиться. Initiation должна идти из
+		// data-path (пакет из TUN, waitHandshake шлёт), как в эксплуатации.
+		if err := nat.dev.dev.IpcSet(withoutKeepalive(pubBlock)); err != nil {
+			t.Fatalf("re-add peer: %v", err)
 		}
-		nat.send(pub, "kick")
+		if !waitHandshake(t, nat, pub, upWithin) {
+			t.Fatalf("handshake #%d не завершился во время смены I1", i)
+		}
+		if swaps.Load() == before {
+			t.Fatalf("handshake #%d прошёл без единой смены I1 — гонка не проверена", i)
+		}
 	}
-	<-done
+	close(stop)
+	<-swapperDone
 
 	if !reachable(t, nat, pub, upWithin) || !reachable(t, pub, nat, upWithin) {
 		t.Fatal("после горячей смены I1 туннель не работает")
 	}
+}
+
+// waitHandshake шлёт пакеты from→to, пока device from не покажет завершённый handshake
+// с to (свежий пир после UpdatePeer начинает с нулевого LastHandshake).
+func waitHandshake(t testing.TB, from, to *tnode, within time.Duration) bool {
+	t.Helper()
+	want := to.priv.Public().String()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		from.send(to, "kick")
+		stats, err := from.dev.PeerStats()
+		if err != nil {
+			t.Fatalf("PeerStats: %v", err)
+		}
+		for _, s := range stats {
+			if s.PublicKey == want && !s.LastHandshake.IsZero() {
+				return true
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // Крупный пакет (близко к MTU awg0) обязан пройти целиком при большом S4: S4 добавляется

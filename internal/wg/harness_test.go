@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +33,8 @@ type tnode struct {
 	priv wgkey.Private
 	dev  *Device
 	ctun *tuntest.ChannelTUN
-	rx   chan []byte // пакеты, которые device отдал «в ОС» (дренаж Inbound)
+	rx   chan []byte   // пакеты, которые device отдал «в ОС» (дренаж Inbound)
+	wire *atomic.Int64 // сколько UDP-датаграмм РЕАЛЬНО пришло на сокет ноды
 }
 
 // newTNode создаёт ноду с mesh-IP ip. Inbound у ChannelTUN небуферизован: без
@@ -44,11 +46,13 @@ func newTNode(t testing.TB, name, ip string) *tnode {
 		t.Fatal(err)
 	}
 	ctun := tuntest.NewChannelTUN()
+	wire := new(atomic.Int64)
+	bind := countingBind{Bind: conn.NewDefaultBind(), rx: wire}
 	dev := &Device{
-		dev:  device.NewDevice(ctun.TUN(), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, "")),
+		dev:  device.NewDevice(ctun.TUN(), bind, device.NewLogger(device.LogLevelSilent, "")),
 		name: name,
 	}
-	n := &tnode{name: name, ip: netip.MustParseAddr(ip), priv: priv, dev: dev, ctun: ctun, rx: make(chan []byte, 4096)}
+	n := &tnode{name: name, ip: netip.MustParseAddr(ip), priv: priv, dev: dev, ctun: ctun, rx: make(chan []byte, 4096), wire: wire}
 	stop := make(chan struct{})
 	go n.drain(stop)
 	t.Cleanup(func() {
@@ -182,6 +186,86 @@ func randToken(t testing.TB) string {
 		t.Fatal(err)
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// peerEndpoint — endpoint, который device ноды n держит для пира peer (из UAPI-дампа).
+func peerEndpoint(t testing.TB, n, peer *tnode) (string, bool) {
+	t.Helper()
+	want := "public_key=" + peer.priv.Public().Hex()
+	inPeer := false
+	for _, line := range strings.Split(n.uapi(t), "\n") {
+		if strings.HasPrefix(line, "public_key=") {
+			inPeer = line == want
+			continue
+		}
+		if v, ok := strings.CutPrefix(line, "endpoint="); ok && inPeer {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// withoutKeepalive убирает keepalive из продуктового peer-блока (см. hot-swap-тесты).
+func withoutKeepalive(block string) string {
+	return strings.Replace(block, fmt.Sprintf("persistent_keepalive_interval=%d\n", persistentKeepaliveSec), "", 1)
+}
+
+// countingBind считает UDP-датаграммы, реально полученные сокетом device. Нужен, чтобы
+// отрицательная проверка («трафик НЕ проходит») опиралась на факт «пакеты дошли до
+// сокета и были отброшены», а не на «за N мс ничего не пришло» — второе на медленном CI
+// молча зеленеет, даже если отправитель вообще ничего не слал.
+type countingBind struct {
+	conn.Bind
+	rx *atomic.Int64
+}
+
+func (b countingBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
+	fns, actual, err := b.Bind.Open(port)
+	wrapped := make([]conn.ReceiveFunc, len(fns))
+	for i, fn := range fns {
+		wrapped[i] = func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
+			n, err := fn(packets, sizes, eps)
+			b.rx.Add(int64(n))
+			return n, err
+		}
+	}
+	return wrapped, actual, err
+}
+
+// antiReplayWindow — пауза между переинициациями handshake'а с одним пиром. Метка
+// TAI64N в initiation округляется до 2^24 нс (≈16.8 мс), а получатель принимает только
+// строго бо́льшую: переинициация в том же окне отбрасывается как повтор, и device
+// ждёт ретрая REKEY_TIMEOUT (5 с) — тест «работает», но в сотни раз медленнее.
+const antiReplayWindow = 50 * time.Millisecond
+
+// minDroppedDatagrams — сколько датаграмм отправителя должно ДОЙТИ до сокета получателя,
+// чтобы «ни один пакет не доставлен в TUN» считалось доказательством отказа, а не задержки.
+const minDroppedDatagrams = 6
+
+// notDelivered доказывает, что трафик from→to НЕ проходит: шлёт пакеты, пока сокет
+// получателя не примет minDroppedDatagrams новых датаграмм, и проверяет, что ни один
+// пакет с токеном не попал в TUN получателя. Если датаграммы не доходят вовсе — тест
+// падает: доказать отказ device нечем (это сеть/отправитель, а не обфускация).
+func notDelivered(t testing.TB, from, to *tnode) {
+	t.Helper()
+	token := randToken(t)
+	start := to.wire.Load()
+	deadline := time.Now().Add(upWithin)
+	for i := 0; to.wire.Load()-start < minDroppedDatagrams; i++ {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s→%s: до сокета дошло %d датаграмм из %d нужных — отказ device не доказан",
+				from.name, to.name, to.wire.Load()-start, minDroppedDatagrams)
+		}
+		if !from.send(to, fmt.Sprintf("%s#%d", token, i)) {
+			t.Fatalf("%s: TUN не принимает пакеты — device завис", from.name)
+		}
+		if to.waitPrefix(token, 100*time.Millisecond) {
+			t.Fatalf("%s→%s: пакет доставлен, хотя должен быть отброшен", from.name, to.name)
+		}
+	}
+	if to.waitPrefix(token, 200*time.Millisecond) {
+		t.Fatalf("%s→%s: пакет доставлен, хотя должен быть отброшен", from.name, to.name)
+	}
 }
 
 // udpPacket — минимальный корректный IPv4/UDP-пакет (UDP-checksum 0 — допустим для IPv4).
