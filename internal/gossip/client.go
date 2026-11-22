@@ -31,6 +31,9 @@ type Client struct {
 	// недостижимый endpoint-пир уходит в backoff, чтобы не жечь ½ циклов на таймаут.
 	selector *targetSelector
 	log      *slog.Logger
+	// rejected — отказ в кривом Pending логируется один раз на версию (тот же Pending
+	// приходит каждый gossip-цикл; см. versionOnce).
+	rejected versionOnce
 }
 
 // NewClient создаёт gossip-клиента. onNewPeers/onRemovedPeers — callback'и для
@@ -117,6 +120,7 @@ func (c *Client) doRound(ctx context.Context) {
 	var changed, removed []state.Peer
 	var rejected []string
 	var adoptedPending *state.PendingParams
+	var pendingErr error
 	var newTombstones int
 	if _, err := c.store.Update(func(s *state.State) error {
 		// Сначала мерджим отзывы: MergePeers ниже должен видеть актуальный набор
@@ -133,10 +137,13 @@ func (c *Client) doRound(ctx context.Context) {
 		// в следующем цикле отозванного уже нет в s.Peers → removed пуст.
 		_, removed = mesh.ApplyTombstones(s.Peers, mergedTomb, c.selfPub)
 
-		// Принять запланированную смену params, если она строго новее нашей
-		// (домен решает монотонность). Trust-by-tunneling: внутри wg-туннеля
-		// источник уже прошёл cluster-secret-проверку.
-		if mesh.ShouldAdoptPending(s.ParamsVersion, s.Pending, resp.Pending) {
+		// Принять запланированную смену params, если она строго новее нашей и device её
+		// примет (домен решает и то и другое). Trust-by-tunneling: внутри wg-туннеля
+		// источник уже прошёл cluster-secret-проверку — но набор всё равно проверяем:
+		// кривой Pending, записанный в state, положил бы ноду на следующем рестарте.
+		adopt, perr := mesh.AdoptPending(s.ParamsVersion, s.Pending, resp.Pending)
+		pendingErr = perr
+		if adopt {
 			s.Pending = resp.Pending
 			adoptedPending = resp.Pending
 		}
@@ -152,6 +159,9 @@ func (c *Client) doRound(ctx context.Context) {
 	}); err != nil {
 		c.log.Warn("merge/save state failed", "err", err)
 		return
+	}
+	if pendingErr != nil && c.rejected.first(resp.Pending.Version) {
+		c.log.Error("pending params rejected", "err", pendingErr, "from", target.Label)
 	}
 	if adoptedPending != nil {
 		c.log.Info("pending params adopted", "version", adoptedPending.Version,
