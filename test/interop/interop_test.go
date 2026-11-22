@@ -51,6 +51,7 @@ const upWithin = 10 * time.Second
 type dev interface {
 	IpcSet(string) error
 	IpcGet() (string, error)
+	IsUnderLoad() bool
 	Close()
 }
 
@@ -63,6 +64,21 @@ type node struct {
 	outbound chan<- []byte
 	rx       chan []byte
 	wire     *atomic.Int64 // UDP-датаграммы, реально полученные сокетом
+	// cookieShape — как выглядит cookie-reply при текущих params (S3, H3); nil — не ищем.
+	cookieShape atomic.Pointer[awgparams.Params]
+	cookies     atomic.Int64 // сколько cookie-reply реально пришло на сокет
+}
+
+// inspect считает принятые датаграммы, похожие на cookie-reply: S3 байт паддинга +
+// 64 байта сообщения, тип (LE uint32 сразу после паддинга) — в диапазоне H3.
+func (n *node) inspect(pkt []byte) {
+	p := n.cookieShape.Load()
+	if p == nil || len(pkt) != p.S3+64 {
+		return
+	}
+	if typ := binary.LittleEndian.Uint32(pkt[p.S3:]); typ >= p.H3.Min && typ <= p.H3.Max {
+		n.cookies.Add(1)
+	}
 }
 
 func newNode(t *testing.T, lib, name, ip string) *node {
@@ -76,11 +92,11 @@ func newNode(t *testing.T, lib, name, ip string) *node {
 	switch lib {
 	case "old":
 		ct := oldtuntest.NewChannelTUN()
-		n.d = olddevice.NewDevice(ct.TUN(), oldCountingBind{Bind: oldconn.NewDefaultBind(), rx: n.wire}, olddevice.NewLogger(olddevice.LogLevelSilent, ""))
+		n.d = olddevice.NewDevice(ct.TUN(), oldCountingBind{Bind: oldconn.NewDefaultBind(), rx: n.wire, inspect: n.inspect}, olddevice.NewLogger(olddevice.LogLevelSilent, ""))
 		n.outbound, inbound = ct.Outbound, ct.Inbound
 	case "new":
 		ct := newtuntest.NewChannelTUN()
-		n.d = newdevice.NewDevice(ct.TUN(), newCountingBind{Bind: newconn.NewDefaultBind(), rx: n.wire}, newdevice.NewLogger(newdevice.LogLevelSilent, ""))
+		n.d = newdevice.NewDevice(ct.TUN(), newCountingBind{Bind: newconn.NewDefaultBind(), rx: n.wire, inspect: n.inspect}, newdevice.NewLogger(newdevice.LogLevelSilent, ""))
 		n.outbound, inbound = ct.Outbound, ct.Inbound
 	default:
 		t.Fatalf("lib %q", lib)
@@ -177,7 +193,8 @@ func reachable(t *testing.T, from, to *node, within time.Duration) bool {
 // Счётчики датаграмм для обеих библиотек: у них разные типы conn.Bind/ReceiveFunc.
 type oldCountingBind struct {
 	oldconn.Bind
-	rx *atomic.Int64
+	rx      *atomic.Int64
+	inspect func([]byte) // каждая принятая датаграмма (для поиска cookie-reply)
 }
 
 func (b oldCountingBind) Open(port uint16) ([]oldconn.ReceiveFunc, uint16, error) {
@@ -187,6 +204,9 @@ func (b oldCountingBind) Open(port uint16) ([]oldconn.ReceiveFunc, uint16, error
 		out[i] = func(p [][]byte, sz []int, eps []oldconn.Endpoint) (int, error) {
 			n, err := fn(p, sz, eps)
 			b.rx.Add(int64(n))
+			for k := 0; k < n; k++ {
+				b.inspect(p[k][:sz[k]])
+			}
 			return n, err
 		}
 	}
@@ -195,7 +215,8 @@ func (b oldCountingBind) Open(port uint16) ([]oldconn.ReceiveFunc, uint16, error
 
 type newCountingBind struct {
 	newconn.Bind
-	rx *atomic.Int64
+	rx      *atomic.Int64
+	inspect func([]byte) // каждая принятая датаграмма (для поиска cookie-reply)
 }
 
 func (b newCountingBind) Open(port uint16) ([]newconn.ReceiveFunc, uint16, error) {
@@ -205,6 +226,9 @@ func (b newCountingBind) Open(port uint16) ([]newconn.ReceiveFunc, uint16, error
 		out[i] = func(p [][]byte, sz []int, eps []newconn.Endpoint) (int, error) {
 			n, err := fn(p, sz, eps)
 			b.rx.Add(int64(n))
+			for k := 0; k < n; k++ {
+				b.inspect(p[k][:sz[k]])
+			}
 			return n, err
 		}
 	}
