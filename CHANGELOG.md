@@ -3,12 +3,18 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/) (0.x — API не стабилен).
 
-## [Unreleased]
+## [0.8.0] — 2026-11-22
+
+Data plane переведён на amneziawg-go v3.1, сборка — на Go 1.27.4. Закрыты два пути,
+которыми нода могла не подняться после рестарта: полуприменённый и непроверенный
+flag-day-набор. Wire совместим с 0.7.x — ноды обновляются по одной; на время
+раскатки сетевые params (`set-params`) не менять.
 
 ### Changed
 - **Data plane на amneziawg-go v3.1 (v3.1.20261116)** вместо 0.2.19. Wire совместим
-  с 0.2.x (проверено тестами смешанной пары во всех ролях, с I1, при flag-day и на
-  легаси-наборе H из AWG-1.0) — ноды можно обновлять по одной. Из v3 приходят фиксы
+  с 0.2.x (проверено тестами смешанной пары во всех ролях, с I1, при flag-day, на
+  легаси-наборе H из AWG-1.0 и при обмене cookie под handshake-флудом) — ноды можно
+  обновлять по одной. Из v3 приходят фиксы
   гонок при горячей смене I1-I5 (`set-params --i1`/`--sni`) и S4 (flag-day): в 0.2.x
   IpcSet писал эти поля неатомарно, пока рутины отправки/приёма их читали.
 - Сборка на Go 1.27.4; golang.org/x/crypto, x/net, x/sys обновлены.
@@ -541,6 +547,7 @@ security-векторов control plane, надёжность записи на 
   сервер только на mesh-IP.
 - Packaging: `.deb` через nfpm (amd64/arm64), systemd-unit, GHA CI/Release.
 
+[0.8.0]: https://github.com/tumour/awg-mesh/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/tumour/awg-mesh/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/tumour/awg-mesh/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/tumour/awg-mesh/compare/v0.6.6...v0.7.0
