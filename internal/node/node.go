@@ -407,13 +407,24 @@ func (f *paramFlipper) observe(p *state.PendingParams, now time.Time) {
 // applyIfDue фиксирует новый набор в state (под Store.Update, RMW-safe) и reconfigure'ит
 // device на лету, если mesh.ShouldFire (due + держим ApplyAt дольше abortMargin).
 // Идемпотентно: не пора / нет Pending → ErrNoChange (диск не трогаем).
+//
+// Набор, который device отвергнет, в state.AwgParams НЕ пишется НИКОГДА: на следующем
+// рестарте Configure не поднял бы awg0 — нода потеряна (watchdog self-upgrade этого уже
+// не видит). Такой Pending мог лечь в state до апгрейда (старый бинарь принимал без
+// проверки) — снимаем его, оставаясь на текущем наборе.
 func (f *paramFlipper) applyIfDue(now time.Time) {
 	var applied awgparams.Params
 	var version uint64
 	var did bool // выставляется в fn только при реальном применении (Update гасит ErrNoChange в nil)
+	var dropped error
 	if _, err := f.store.Update(func(s *state.State) error {
 		if !mesh.ShouldFire(s.Pending, f.seenAtFor(s.Pending), now, f.abortMargin, f.maxStale) {
 			return state.ErrNoChange
+		}
+		if err := awgparams.CheckDeviceLimits(s.Pending.Params); err != nil {
+			dropped = fmt.Errorf("pending v%d: %w", s.Pending.Version, err)
+			s.Pending = nil
+			return nil
 		}
 		applied, version, did = s.Pending.Params, s.Pending.Version, true
 		s.AwgParams = applied
@@ -422,6 +433,10 @@ func (f *paramFlipper) applyIfDue(now time.Time) {
 		return nil
 	}); err != nil {
 		f.log.Error("flip: persist params failed", "err", err)
+		return
+	}
+	if dropped != nil {
+		f.log.Error("flip: pending отброшен — device его не примет, остаёмся на текущем наборе", "err", dropped)
 		return
 	}
 	if !did {

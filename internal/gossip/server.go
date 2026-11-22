@@ -47,6 +47,9 @@ type Server struct {
 	addr  string
 	srv   *http.Server
 	log   *slog.Logger
+	// rejected — отказ в кривом Pending логируется один раз на версию (seed пушит
+	// повторно каждый тик; см. versionOnce).
+	rejected versionOnce
 }
 
 // PeersResponse — JSON-форма ответа на /v1/peers. Peers — общий wire-DTO

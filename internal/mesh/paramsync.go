@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
@@ -51,6 +53,34 @@ func ShouldAdoptPending(currentVersion uint64, local, remote *state.PendingParam
 	}
 	// Та же версия: принять ТОЛЬКО commit поверх локального анонса (announced→committed).
 	return local.ApplyAt.IsZero() && !remote.ApplyAt.IsZero()
+}
+
+// ErrPendingRejected — Pending новее нашего, но его набор device отвергнет (см. AdoptPending).
+var ErrPendingRejected = errors.New("pending params отвергнуты: device их не примет")
+
+// AdoptPending — решение «принять ли Pending» для ОБОИХ каналов доставки (gossip-pull и
+// push от seed): версия решается ShouldAdoptPending, и только если по версии принимаем —
+// набор обязан пройти лимиты device (awgparams.CheckDeviceLimits).
+//
+// Зачем здесь, а не при применении: принятый Pending флиппер позже запишет в
+// state.AwgParams, и набор, который device отвергнет, положит ноду на следующем
+// рестарте (Configure не поднимет awg0). Отказ здесь = нода не шлёт ack, seed не
+// коммитит flag-day, mesh остаётся согласованным на старом наборе.
+//
+// Именно лимиты device, а не политика Validate: набор вне политики, но приемлемый для
+// библиотеки (легаси-state, seed другой версии) обязан приниматься — иначе нода одна
+// отстанет от всего mesh.
+//
+// (false, nil) — не новее, отказ без ошибки (идемпотентный повтор/устаревшее);
+// (false, err) — новее, но набор невалиден для device.
+func AdoptPending(currentVersion uint64, local, remote *state.PendingParams) (bool, error) {
+	if !ShouldAdoptPending(currentVersion, local, remote) {
+		return false, nil
+	}
+	if err := awgparams.CheckDeviceLimits(remote.Params); err != nil {
+		return false, fmt.Errorf("%w: v%d: %w", ErrPendingRejected, remote.Version, err)
+	}
+	return true, nil
 }
 
 // PendingDue сообщает, наступил ли момент применить Pending. ApplyAt с нулевым

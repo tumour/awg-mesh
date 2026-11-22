@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -69,10 +70,12 @@ func PushParams(ctx context.Context, hc *http.Client, meshIP string, port int, p
 	return ack, nil
 }
 
-// handleParams принимает seed-push Pending, адоптит его монотонно (ShouldAdoptPending —
-// тот же домен, что и при пассивном pull) и ВСЕГДА отвечает 200 со своим ack (даже на
+// handleParams принимает seed-push Pending, адоптит его монотонно (mesh.AdoptPending —
+// тот же домен, что и при пассивном pull) и отвечает 200 со своим ack (в т.ч. на
 // идемпотентный повтор: seed обязан получить подтверждение, иначе flag-day зависнет).
-// Источник обязан быть seed'ом (flag-day раздаёт только он, как и obf).
+// Исключение — набор, который device отвергнет: 422 без ack и без записи в state (seed
+// не закоммитит flag-day, mesh останется на старом наборе; принятый кривой набор положил
+// бы ноду на следующем рестарте). Источник обязан быть seed'ом (как и для obf).
 func (s *Server) handleParams(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -100,12 +103,23 @@ func (s *Server) handleParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, err := s.store.Update(func(st *state.State) error {
-		if !mesh.ShouldAdoptPending(st.ParamsVersion, st.Pending, push.Pending) {
+		adopt, err := mesh.AdoptPending(st.ParamsVersion, st.Pending, push.Pending)
+		if err != nil {
+			return err
+		}
+		if !adopt {
 			return state.ErrNoChange // уже держим эту/новее или это не новее применённого — идемпотентно
 		}
 		st.Pending = push.Pending
 		return nil
 	})
+	if errors.Is(err, mesh.ErrPendingRejected) {
+		if s.rejected.first(push.Pending.Version) {
+			s.log.Error("rejected pushed pending", "version", push.Pending.Version, "err", err)
+		}
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 	if err != nil {
 		s.log.Error("apply pushed pending failed", "err", err)
 		http.Error(w, "state error", http.StatusInternalServerError)
