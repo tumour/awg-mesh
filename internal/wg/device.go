@@ -107,16 +107,19 @@ func (d *Device) Configure(
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "private_key=%s\n", priv.Hex())
 	fmt.Fprintf(&sb, "listen_port=%d\n", d.listenPort)
-	writeAwgParams(&sb, awgp, localObf)
+	sb.WriteString(NetParamsUAPI(awgp))
+	sb.WriteString(LocalObfUAPI(localObf))
 	sb.WriteString("replace_peers=true\n")
 
 	for _, p := range peers {
 		if p.PublicKey == selfPubKey.String() {
 			continue
 		}
-		if err := writePeer(&sb, p); err != nil {
+		block, err := PeerUAPI(p)
+		if err != nil {
 			return fmt.Errorf("peer %s: %w", p.Label, err)
 		}
+		sb.WriteString(block)
 	}
 	if err := d.dev.IpcSet(sb.String()); err != nil {
 		return fmt.Errorf("IpcSet: %w", err)
@@ -127,11 +130,11 @@ func (d *Device) Configure(
 // UpdatePeer добавляет или обновляет одного peer'а (incremental, без replace_peers).
 // Используется при gossip-update или когда новый peer заджойнился через bootstrap.
 func (d *Device) UpdatePeer(p state.Peer) error {
-	var sb strings.Builder
-	if err := writePeer(&sb, p); err != nil {
+	block, err := PeerUAPI(p)
+	if err != nil {
 		return err
 	}
-	if err := d.dev.IpcSet(sb.String()); err != nil {
+	if err := d.dev.IpcSet(block); err != nil {
 		return fmt.Errorf("IpcSet (update peer %s): %w", p.Label, err)
 	}
 	return nil
@@ -166,40 +169,6 @@ func (d *Device) Close() {
 	}
 }
 
-// writeAwgParams сериализует AmneziaWG-параметры в UAPI-формат: сетевые (S/H/J)
-// + per-node CPS-пакеты (I1-I5). Используется при полном Configure.
-func writeAwgParams(sb *strings.Builder, p awgparams.Params, lo awgparams.LocalObf) {
-	writeNetParams(sb, p)
-	writeLocalObf(sb, lo)
-}
-
-// writeNetParams — СЕТЕВЫЕ params (одинаковы на всех нодах). H1-H4 как "min-max"
-// (amneziawg-go newMagicHeader; min==max → фикс. значение). S3/S4 шлём всегда:
-// lib трактует 0 как «padding выключен». Этим же набором делается reconfigure
-// на лету при flag-day-смене (ApplyParams) — без replace_peers/private_key.
-func writeNetParams(sb *strings.Builder, p awgparams.Params) {
-	fmt.Fprintf(sb, "jc=%d\n", p.Jc)
-	fmt.Fprintf(sb, "jmin=%d\n", p.Jmin)
-	fmt.Fprintf(sb, "jmax=%d\n", p.Jmax)
-	fmt.Fprintf(sb, "s1=%d\n", p.S1)
-	fmt.Fprintf(sb, "s2=%d\n", p.S2)
-	fmt.Fprintf(sb, "s3=%d\n", p.S3)
-	fmt.Fprintf(sb, "s4=%d\n", p.S4)
-	writeHeader(sb, "h1", p.H1)
-	writeHeader(sb, "h2", p.H2)
-	writeHeader(sb, "h3", p.H3)
-	writeHeader(sb, "h4", p.H4)
-}
-
-// writeLocalObf — per-node CPS-пакеты I1-I5 (только непустые).
-func writeLocalObf(sb *strings.Builder, lo awgparams.LocalObf) {
-	for i, spec := range [5]string{lo.I1, lo.I2, lo.I3, lo.I4, lo.I5} {
-		if spec != "" {
-			fmt.Fprintf(sb, "i%d=%s\n", i+1, spec)
-		}
-	}
-}
-
 // ApplyParams применяет СЕТЕВЫЕ params к уже поднятому awg0 на лету (flag-day
 // flip) — через UAPI, без replace_peers и пересоздания интерфейса. Туннели
 // рехендшейкаются на новых S/H, но IP/маршруты/пиры сохраняются. Ошибка → device
@@ -212,9 +181,7 @@ func (d *Device) ApplyParams(p awgparams.Params) error {
 	if err := awgparams.CheckDeviceLimits(p); err != nil {
 		return fmt.Errorf("net-params: %w", err)
 	}
-	var sb strings.Builder
-	writeNetParams(&sb, p)
-	if err := d.dev.IpcSet(sb.String()); err != nil {
+	if err := d.dev.IpcSet(NetParamsUAPI(p)); err != nil {
 		return fmt.Errorf("IpcSet net-params: %w", err)
 	}
 	return nil
@@ -224,35 +191,51 @@ func (d *Device) ApplyParams(p awgparams.Params) error {
 // без пересоздания интерфейса. I1 initiator-local (получатель его игнорирует) → туннели
 // НЕ рвутся, синхронность не нужна. Ошибка IpcSet (кривой spec) → caller оставляет прежний obf.
 func (d *Device) ApplyObf(lo awgparams.LocalObf) error {
-	var sb strings.Builder
-	writeLocalObf(&sb, lo)
-	if err := d.dev.IpcSet(sb.String()); err != nil {
+	if err := d.dev.IpcSet(LocalObfUAPI(lo)); err != nil {
 		return fmt.Errorf("IpcSet local-obf: %w", err)
 	}
 	return nil
 }
 
-// writeHeader — magic-header в формате "key=min-max".
-func writeHeader(sb *strings.Builder, key string, h awgparams.HeaderRange) {
-	fmt.Fprintf(sb, "%s=%d-%d\n", key, h.Min, h.Max)
+// NetParamsUAPI — СЕТЕВЫЕ params (одинаковы на всех нодах) в UAPI-формате device.
+// H1-H4 как "min-max" (min==max → фиксированное значение). S3/S4 шлём всегда: device
+// трактует 0 как «padding выключен». Этим же текстом делается reconfigure на лету при
+// flag-day (ApplyParams) — без replace_peers/private_key. Экспортирован как единственный
+// источник формата: interop-тесты обязаны слать ровно то, что шлёт meshd.
+func NetParamsUAPI(p awgparams.Params) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "jc=%d\njmin=%d\njmax=%d\n", p.Jc, p.Jmin, p.Jmax)
+	fmt.Fprintf(&sb, "s1=%d\ns2=%d\ns3=%d\ns4=%d\n", p.S1, p.S2, p.S3, p.S4)
+	for i, h := range [4]awgparams.HeaderRange{p.H1, p.H2, p.H3, p.H4} {
+		fmt.Fprintf(&sb, "h%d=%d-%d\n", i+1, h.Min, h.Max)
+	}
+	return sb.String()
 }
 
-// writePeer добавляет один peer block в UAPI-команду.
-// AllowedIPs — только NodeIP/32 (peer-to-peer routing внутри mesh).
-// Endpoint и keepalive — только если у peer'а есть public-endpoint
-// (иначе он сам initiates handshake, мы лишь listener).
-func writePeer(sb *strings.Builder, p state.Peer) error {
+// LocalObfUAPI — per-node CPS-пакеты I1-I5 в UAPI-формате (только непустые).
+func LocalObfUAPI(lo awgparams.LocalObf) string {
+	var sb strings.Builder
+	for i, spec := range [5]string{lo.I1, lo.I2, lo.I3, lo.I4, lo.I5} {
+		if spec != "" {
+			fmt.Fprintf(&sb, "i%d=%s\n", i+1, spec)
+		}
+	}
+	return sb.String()
+}
+
+// PeerUAPI — один peer-блок в UAPI-формате. AllowedIPs — только NodeIP/32
+// (peer-to-peer routing внутри mesh). Endpoint и keepalive — только если у peer'а есть
+// public-endpoint (иначе он сам инициирует handshake, мы лишь отвечаем).
+func PeerUAPI(p state.Peer) (string, error) {
 	pubHex, err := base64ToHex(p.PublicKey)
 	if err != nil {
-		return fmt.Errorf("decode pubkey: %w", err)
+		return "", fmt.Errorf("decode pubkey: %w", err)
 	}
-	fmt.Fprintf(sb, "public_key=%s\n", pubHex)
-	fmt.Fprintf(sb, "allowed_ip=%s/32\n", p.NodeIP)
-	if p.Endpoint != "" {
-		fmt.Fprintf(sb, "endpoint=%s\n", p.Endpoint)
-		fmt.Fprintf(sb, "persistent_keepalive_interval=%d\n", persistentKeepaliveSec)
+	block := fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", pubHex, p.NodeIP)
+	if p.Endpoint == "" {
+		return block, nil
 	}
-	return nil
+	return block + fmt.Sprintf("endpoint=%s\npersistent_keepalive_interval=%d\n", p.Endpoint, persistentKeepaliveSec), nil
 }
 
 // base64ToHex — конверсия base64-pubkey (формат state.json) в hex (формат UAPI).

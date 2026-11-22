@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/awgparams/awgtest"
 	"github.com/tumour/awg-mesh/internal/mesh"
 	"github.com/tumour/awg-mesh/internal/proto"
 	"github.com/tumour/awg-mesh/internal/state"
@@ -484,7 +484,7 @@ func fakeServerWithPending(t *testing.T, peers []proto.PeerInfo, version uint64,
 // handlePeers раздаёт версию params и Pending (для flag-day-смены).
 func TestHandlePeersReturnsPending(t *testing.T) {
 	pend := &state.PendingParams{Version: 7, ApplyAt: time.Now().Add(time.Minute).UTC(),
-		Params: awgparams.Params{S4: 16}}
+		Params: awgtest.Valid(16)}
 	store := saveState(t, &state.State{
 		NetworkCIDR: "100.64.0.0/24", PublicKey: "selfkey", NodeIP: "100.64.0.1",
 		ParamsVersion: 6, Pending: pend,
@@ -508,7 +508,7 @@ func TestHandlePeersReturnsPending(t *testing.T) {
 func TestDoRoundAdoptsNewerPending(t *testing.T) {
 	const self, targetKey = "selfkey", "targetkey"
 	pend := &state.PendingParams{Version: 5, ApplyAt: time.Now().Add(time.Minute).UTC(),
-		Params: awgparams.Params{S4: 16}}
+		Params: awgtest.Valid(16)}
 	host, port, ts := fakeServerWithPending(t,
 		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
 		5, pend)
@@ -536,7 +536,7 @@ func TestDoRoundAdoptsNewerPending(t *testing.T) {
 func TestDoRoundAdoptsCommitOnAnnounced(t *testing.T) {
 	const self, targetKey = "selfkey", "targetkey"
 	applyAt := time.Now().Add(2 * time.Minute).UTC()
-	committedPend := &state.PendingParams{Version: 5, ApplyAt: applyAt, Params: awgparams.Params{S4: 16}}
+	committedPend := &state.PendingParams{Version: 5, ApplyAt: applyAt, Params: awgtest.Valid(16)}
 	host, port, ts := fakeServerWithPending(t,
 		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
 		4, committedPend)
@@ -546,7 +546,7 @@ func TestDoRoundAdoptsCommitOnAnnounced(t *testing.T) {
 	store := saveState(t, &state.State{
 		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
 		ParamsVersion: 4,
-		Pending:       &state.PendingParams{Version: 5, Params: awgparams.Params{S4: 16}}, // ApplyAt=0
+		Pending:       &state.PendingParams{Version: 5, Params: awgtest.Valid(16)}, // ApplyAt=0
 		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
 	})
 	c := NewClient(store, self, time.Minute, port, nil, nil, discardLogger())
@@ -573,13 +573,13 @@ func TestDoRoundDoesNotRescheduleCommitted(t *testing.T) {
 	theirs := time.Now().Add(10 * time.Minute).UTC()
 	host, port, ts := fakeServerWithPending(t,
 		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
-		4, &state.PendingParams{Version: 5, ApplyAt: theirs})
+		4, &state.PendingParams{Params: awgtest.Valid(16), Version: 5, ApplyAt: theirs})
 	defer ts.Close()
 
 	store := saveState(t, &state.State{
 		NetworkCIDR: "100.64.0.0/24", PublicKey: self, NodeIP: "100.64.0.1",
 		ParamsVersion: 4,
-		Pending:       &state.PendingParams{Version: 5, ApplyAt: ours}, // уже committed у нас
+		Pending:       &state.PendingParams{Params: awgtest.Valid(16), Version: 5, ApplyAt: ours}, // уже committed у нас
 		Peers:         []state.Peer{{Label: "target", PublicKey: targetKey, NodeIP: host, Endpoint: "203.0.113.1:51820"}},
 	})
 	c := NewClient(store, self, time.Minute, port, nil, nil, discardLogger())
@@ -595,7 +595,7 @@ func TestDoRoundDoesNotRescheduleCommitted(t *testing.T) {
 // doRound ИГНОРИРУЕТ устаревший Pending (версия не новее уже применённой).
 func TestDoRoundIgnoresStalePending(t *testing.T) {
 	const self, targetKey = "selfkey", "targetkey"
-	stale := &state.PendingParams{Version: 3, ApplyAt: time.Now().Add(time.Minute).UTC()}
+	stale := &state.PendingParams{Params: awgtest.Valid(16), Version: 3, ApplyAt: time.Now().Add(time.Minute).UTC()}
 	host, port, ts := fakeServerWithPending(t,
 		[]proto.PeerInfo{{Label: "t", PublicKey: targetKey, NodeIP: "100.64.0.2", Endpoint: "203.0.113.1:51820"}},
 		3, stale)

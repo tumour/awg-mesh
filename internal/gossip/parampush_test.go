@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/awgparams/awgtest"
 	"github.com/tumour/awg-mesh/internal/state"
 )
 
@@ -48,7 +48,7 @@ func TestHandleParams_AdoptsAnnounceAndAcks(t *testing.T) {
 	})
 	srv := NewServer("100.64.0.2", DefaultPort, store, discardLogger())
 
-	announce := &state.PendingParams{Version: 5, Params: awgparams.Params{S4: 16}} // ApplyAt=0
+	announce := &state.PendingParams{Version: 5, Params: awgtest.Valid(16)} // ApplyAt=0
 	rec := pushParamsReq(t, srv, "100.64.0.1", ParamPush{Pending: announce})
 
 	if rec.Code != http.StatusOK {
@@ -78,12 +78,12 @@ func TestHandleParams_AdoptsCommitOnAnnounced(t *testing.T) {
 	store := saveState(t, &state.State{
 		NetworkCIDR: "100.64.0.0/24", PublicKey: "SELF", NodeIP: "100.64.0.2",
 		ParamsVersion: 4,
-		Pending:       &state.PendingParams{Version: 5, Params: awgparams.Params{S4: 16}}, // announced
+		Pending:       &state.PendingParams{Version: 5, Params: awgtest.Valid(16)}, // announced
 		Peers:         seedPeers("100.64.0.1", "SELF", "100.64.0.2"),
 	})
 	srv := NewServer("100.64.0.2", DefaultPort, store, discardLogger())
 
-	committed := &state.PendingParams{Version: 5, ApplyAt: applyAt, Params: awgparams.Params{S4: 16}}
+	committed := &state.PendingParams{Version: 5, ApplyAt: applyAt, Params: awgtest.Valid(16)}
 	rec := pushParamsReq(t, srv, "100.64.0.1", ParamPush{Pending: committed})
 
 	var ack ParamAck
@@ -107,7 +107,7 @@ func TestHandleParams_Idempotent(t *testing.T) {
 		ParamsVersion: 4, Peers: seedPeers("100.64.0.1", "SELF", "100.64.0.2"),
 	})
 	srv := NewServer("100.64.0.2", DefaultPort, store, discardLogger())
-	push := ParamPush{Pending: &state.PendingParams{Version: 5}}
+	push := ParamPush{Pending: &state.PendingParams{Params: awgtest.Valid(16), Version: 5}}
 
 	_ = pushParamsReq(t, srv, "100.64.0.1", push)
 	rec := pushParamsReq(t, srv, "100.64.0.1", push) // повтор
@@ -139,7 +139,7 @@ func TestHandleParams_RejectsNonSeed(t *testing.T) {
 	})
 	srv := NewServer("100.64.0.2", DefaultPort, store, discardLogger())
 
-	rec := pushParamsReq(t, srv, "100.64.0.9", ParamPush{Pending: &state.PendingParams{Version: 5}})
+	rec := pushParamsReq(t, srv, "100.64.0.9", ParamPush{Pending: &state.PendingParams{Params: awgtest.Valid(16), Version: 5}})
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("push не от seed: status %d, want 403", rec.Code)
@@ -210,7 +210,7 @@ func TestPushParams_RoundTrip(t *testing.T) {
 
 	hc := &http.Client{Timeout: 5 * time.Second}
 	ack, err := PushParams(context.Background(), hc, host, port,
-		ParamPush{Pending: &state.PendingParams{Version: 7}})
+		ParamPush{Pending: &state.PendingParams{Params: awgtest.Valid(16), Version: 7}})
 	if err != nil {
 		t.Fatalf("PushParams: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestPushParams_RoundTrip(t *testing.T) {
 	defer bad.Close()
 	bh, bp, _ := net.SplitHostPort(bad.Listener.Addr().String())
 	bpn, _ := strconv.Atoi(bp)
-	if _, err := PushParams(context.Background(), hc, bh, bpn, ParamPush{Pending: &state.PendingParams{Version: 7}}); err == nil {
+	if _, err := PushParams(context.Background(), hc, bh, bpn, ParamPush{Pending: &state.PendingParams{Params: awgtest.Valid(16), Version: 7}}); err == nil {
 		t.Fatal("ожидалась ошибка на 500-ответ")
 	}
 }

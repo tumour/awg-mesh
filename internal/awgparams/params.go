@@ -70,13 +70,13 @@ func (h *HeaderRange) UnmarshalJSON(data []byte) error {
 //	H1-H4: непересекающиеся диапазоны uint32 в [5, 2^31-1] (safe-half для
 //	              совместимости с Windows-клиентами)
 type Params struct {
-	Jc   int `json:"jc"`
-	Jmin int `json:"jmin"`
-	Jmax int `json:"jmax"`
-	S1   int `json:"s1"`
-	S2   int `json:"s2"`
-	S3   int `json:"s3"`
-	S4   int `json:"s4"`
+	Jc   int         `json:"jc"`
+	Jmin int         `json:"jmin"`
+	Jmax int         `json:"jmax"`
+	S1   int         `json:"s1"`
+	S2   int         `json:"s2"`
+	S3   int         `json:"s3"`
+	S4   int         `json:"s4"`
 	H1   HeaderRange `json:"h1"`
 	H2   HeaderRange `json:"h2"`
 	H3   HeaderRange `json:"h3"`
@@ -278,11 +278,9 @@ func CheckDeviceLimits(p Params) error {
 		if h.Min > h.Max {
 			return fmt.Errorf("H%d: Min %d > Max %d", i+1, h.Min, h.Max)
 		}
-		for j := 0; j < i; j++ {
-			if h.Min <= hs[j].Max && hs[j].Min <= h.Max {
-				return fmt.Errorf("H%d %v пересекается с H%d %v", i+1, h, j+1, hs[j])
-			}
-		}
+	}
+	if i, j, ok := firstOverlap(hs); ok {
+		return fmt.Errorf("H%d %v пересекается с H%d %v", i+1, hs[i], j+1, hs[j])
 	}
 	return nil
 }
@@ -307,18 +305,27 @@ func randHeaderRange() (HeaderRange, error) {
 // validHeaderRanges — каждый диапазон валиден (Min>4, Min<=Max<=safeHeaderMax)
 // И диапазоны H1-H4 попарно не пересекаются.
 func validHeaderRanges(hs [4]HeaderRange) bool {
-	for i, h := range hs {
+	for _, h := range hs {
 		if h.Min <= 4 || h.Min > h.Max || h.Max > safeHeaderMax {
 			return false
 		}
+	}
+	_, _, overlap := firstOverlap(hs)
+	return !overlap
+}
+
+// firstOverlap — первая пара H-диапазонов (i > j), которые пересекаются. Границы
+// включительные: [10,20] и [20,25] пересекаются (device их не различит). Единственное
+// место этого правила — и для политики, и для лимитов device.
+func firstOverlap(hs [4]HeaderRange) (i, j int, found bool) {
+	for i := range hs {
 		for j := 0; j < i; j++ {
-			// пересечение [a.Min,a.Max] и [b.Min,b.Max]
-			if h.Min <= hs[j].Max && hs[j].Min <= h.Max {
-				return false
+			if hs[i].Min <= hs[j].Max && hs[j].Min <= hs[i].Max {
+				return i, j, true
 			}
 		}
 	}
-	return true
+	return 0, 0, false
 }
 
 // randIntRange — случайное целое в диапазоне [min, max] включительно.

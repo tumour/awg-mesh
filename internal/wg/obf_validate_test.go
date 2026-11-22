@@ -31,7 +31,7 @@ func TestAwg2ConfigAcceptedByDevice(t *testing.T) {
 		// Любой валидный 32-байтный приватник (IpcSet парсит hex, силу не проверяет).
 		sb.WriteString("private_key=0000000000000000000000000000000000000000000000000000000000000001\n")
 		sb.WriteString("listen_port=0\n")
-		writeAwgParams(&sb, p, awgparams.DefaultLocalObf())
+		sb.WriteString(NetParamsUAPI(p) + LocalObfUAPI(awgparams.DefaultLocalObf()))
 
 		if err := dev.IpcSet(sb.String()); err != nil {
 			dev.Close()

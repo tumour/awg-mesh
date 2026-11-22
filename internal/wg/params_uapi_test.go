@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/tumour/awg-mesh/internal/awgparams"
+	"github.com/tumour/awg-mesh/internal/state"
 )
 
 // TestWriteAwgParams фиксирует UAPI-формат AWG-2.0: H1-H4 как "min-max",
@@ -21,9 +22,7 @@ func TestWriteAwgParams(t *testing.T) {
 	}
 	lo := awgparams.LocalObf{I1: "<r 64>", I3: "<b 0xdeadbeef>"} // I2/I4/I5 пусты
 
-	var sb strings.Builder
-	writeAwgParams(&sb, p, lo)
-	out := sb.String()
+	out := NetParamsUAPI(p) + LocalObfUAPI(lo)
 
 	mustHave := []string{
 		"jc=5\n", "jmin=50\n", "jmax=200\n",
@@ -40,6 +39,37 @@ func TestWriteAwgParams(t *testing.T) {
 	for _, bad := range []string{"i2=", "i4=", "i5="} {
 		if strings.Contains(out, bad) {
 			t.Errorf("UAPI output must not contain empty %q\n--- got ---\n%s", bad, out)
+		}
+	}
+}
+
+// PeerUAPI — peer-блок, который meshd шлёт в device (его же используют interop-тесты,
+// чтобы проверять РОВНО продуктовый формат, а не копию). Endpoint и keepalive — только
+// у пира с public-endpoint; кривой ключ — ошибка, а не мусор в UAPI.
+func TestPeerUAPI(t *testing.T) {
+	pub := "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+	hexKey := strings.Repeat("01", 32)
+
+	got, err := PeerUAPI(state.Peer{PublicKey: pub, NodeIP: "100.64.0.5", Endpoint: "203.0.113.7:51820"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "public_key=" + hexKey + "\nallowed_ip=100.64.0.5/32\nendpoint=203.0.113.7:51820\npersistent_keepalive_interval=25\n"
+	if got != want {
+		t.Errorf("public-пир:\n got %q\nwant %q", got, want)
+	}
+
+	got, err = PeerUAPI(state.Peer{PublicKey: pub, NodeIP: "100.64.0.6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "public_key=" + hexKey + "\nallowed_ip=100.64.0.6/32\n"; got != want {
+		t.Errorf("NAT-пир:\n got %q\nwant %q", got, want)
+	}
+
+	for _, bad := range []string{"", "not-base64!", "AQID"} {
+		if _, err := PeerUAPI(state.Peer{PublicKey: bad, NodeIP: "100.64.0.7"}); err == nil {
+			t.Errorf("кривой ключ %q принят", bad)
 		}
 	}
 }
